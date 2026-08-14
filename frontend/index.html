@@ -3,20 +3,45 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Label Verify</title>
+    <title>Label Verify - AI-Powered Alcohol Label Verification</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="container">
-      <h1>Label Verify</h1>
+    <div class="page-wrapper">
+      <header class="header">
+        <h1>🏷️ Label Verify</h1>
+        <p class="subtitle">AI-Powered Alcohol Label Verification</p>
+      </header>
 
-      <label for="fileInput">Choose a label image</label>
-      <input id="fileInput" type="file" accept="image/*" />
+      <main class="container">
+        <section class="upload-section">
+          <h2>Upload Label Image</h2>
+          
+          <div class="upload-area" id="uploadArea">
+            <input id="fileInput" type="file" accept="image/*" />
+            <label for="fileInput" class="file-label">
+              <span class="upload-icon">📸</span>
+              <span class="upload-text">Click to select image or drag & drop</span>
+              <span class="upload-hint">Supported: JPG, PNG, GIF (up to 25MB)</span>
+            </label>
+          </div>
 
-      <button id="submitButton" type="button">Submit</button>
+          <button id="submitButton" type="button" class="submit-btn">Verify Label</button>
+        </section>
 
-      <pre id="result">Results will appear here.</pre>
-    </main>
+        <section class="result-section">
+          <div id="result" class="result-container"></div>
+          <div id="loading" class="loading hidden">
+            <div class="spinner"></div>
+            <p>Analyzing label...</p>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <p>Powered by AI Vision & Fuzzy Matching | Real-time Verification</p>
+      </footer>
+    </div>
 
     <script src="./upload.js"></script>
   </body>
