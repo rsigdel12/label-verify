@@ -56,6 +56,16 @@ def test_readiness_reports_bundled_local_ocr():
     assert response.json()["extraction"]["local_ocr_available"] is True
 
 
+def test_application_startup_preloads_local_ocr(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr("app.main.initialize_local_ocr", lambda: calls.append("loaded"))
+    with TestClient(app) as lifespan_client:
+        assert lifespan_client.get("/health").status_code == 200
+
+    assert calls == ["loaded"]
+
+
 def test_verify_clean_fixture_end_to_end():
     metadata = json.loads(
         (FIXTURES / "fixture_01_clean_match.json").read_text(encoding="utf-8")

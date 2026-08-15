@@ -1,15 +1,25 @@
+import asyncio
 import os
 import pathlib
 import shutil
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.extraction.vision_client import rapidocr_available
+from app.extraction.vision_client import initialize_local_ocr, rapidocr_available
 from app.routes.batch import router as batch_router
 from app.routes.verify import router as verify_router
 
-app = FastAPI(title="Label Verify API")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Load the ONNX sessions before Render marks the service ready. This keeps
+    # model initialization out of the first reviewer's processing time.
+    await asyncio.to_thread(initialize_local_ocr)
+    yield
+
+
+app = FastAPI(title="Label Verify API", lifespan=lifespan)
 
 
 @app.get("/health")

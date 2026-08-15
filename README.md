@@ -33,7 +33,7 @@ The generated distilled-spirits fixtures follow the current TTB examples for the
 - `backend/tests/fixtures/` — eight generated label images with JSON application data and intended results.
 - `frontend/assets/sample-label.png` — self-contained sample used by the live demonstration.
 
-Images are normalized with Pillow, limited to 20 megapixels, and resized to a 650-pixel bound before OCR. The repository includes RapidOCR's PP-OCRv6 tiny detection and recognition models, the detector is capped at 384 pixels, and ONNX Runtime uses one inference thread to control latency and peak memory on small deployment instances. OCR runs in a worker thread so inference does not block the async server. A shared, lazily initialized engine avoids reloading the models on every request. Access to the engine is locked because a single inference session is reused safely. Batch requests preserve input order and report failures per file.
+Images are normalized with Pillow, limited to 20 megapixels, and resized to a 650-pixel bound before OCR. The repository includes RapidOCR's PP-OCRv6 tiny detection and recognition models, the detector is capped at 384 pixels, and ONNX Runtime uses one inference thread to control latency and peak memory on small deployment instances. The model sessions are loaded during application startup so initialization is not charged to the first reviewer request. OCR runs in a worker thread so inference does not block the async server. The shared engine avoids reloading the models on every request and is locked so its inference session is reused safely. Batch requests preserve input order and report failures per file.
 
 An optional OpenAI-compatible vision provider and a system Tesseract installation remain as fallback paths. The local engine runs first to keep the normal path fast and functional on Render without secrets or outbound access.
 
@@ -77,7 +77,7 @@ cd label-verify\backend
 python -m pytest -q
 ```
 
-The suite contains 30 tests, including real local OCR through both single and batch multipart endpoints. It also covers matching semantics, validation and error responses, fixture integrity, timing fields, and the frontend/API contract.
+The suite contains 31 tests, including real local OCR through both single and batch multipart endpoints. It also covers startup model loading, matching semantics, validation and error responses, fixture integrity, timing fields, and the frontend/API contract.
 
 Run the complete real-OCR fixture evaluation:
 

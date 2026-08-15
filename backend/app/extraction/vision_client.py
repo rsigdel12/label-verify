@@ -239,6 +239,12 @@ def _get_rapidocr_engine():
     return _rapidocr_engine
 
 
+def initialize_local_ocr() -> None:
+    """Load local model sessions during application startup."""
+    if rapidocr_available():
+        _get_rapidocr_engine()
+
+
 def _run_rapidocr(image_bytes: bytes) -> str:
     """Run the shared ONNX OCR session safely outside the async event loop."""
     engine = _get_rapidocr_engine()
