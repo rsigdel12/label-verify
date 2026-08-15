@@ -1,5 +1,13 @@
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+
+FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" / "fixture_01_clean_match.json").read_text(
+        encoding="utf-8"
+    )
+)["label_data"]
 
 
 class VisionHandler(BaseHTTPRequestHandler):
@@ -12,15 +20,7 @@ class VisionHandler(BaseHTTPRequestHandler):
             "choices": [
                 {
                     "message": {
-                        "content": json.dumps(
-                            {
-                                "brand_name": "Acme Spirits",
-                                "class_type": "Vodka",
-                                "alcohol_content": "40% vol",
-                                "net_contents": "750 ml",
-                                "warning_statement": "Contains sulfites.",
-                            }
-                        )
+                        "content": json.dumps(FIXTURE)
                     }
                 }
             ]

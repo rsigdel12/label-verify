@@ -1,15 +1,45 @@
 import base64
 import json
+import logging
 import os
 import re
-import time
+import shutil
+from io import BytesIO
 from typing import Optional
 
 import httpx
-from PIL import Image
-from io import BytesIO
+from PIL import Image, UnidentifiedImageError
 
+from app.extraction.errors import ExtractionUnavailableError, InvalidImageError
 from app.extraction.schema import ExtractedLabel
+
+logger = logging.getLogger(__name__)
+MAX_IMAGE_PIXELS = 20_000_000
+
+
+def _normalize_image(image_bytes: bytes) -> bytes:
+    if not image_bytes:
+        raise InvalidImageError("The uploaded image is empty.")
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            image.load()
+            width, height = image.size
+            if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
+                raise InvalidImageError(
+                    "The image dimensions are invalid or exceed 20 megapixels."
+                )
+            image = image.convert("RGB")
+            image.thumbnail((2400, 2400))
+            output = BytesIO()
+            image.save(output, format="PNG", optimize=True)
+            return output.getvalue()
+    except InvalidImageError:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise InvalidImageError(
+            "The uploaded file is not a valid PNG, JPEG, WEBP, or GIF image."
+        ) from exc
 
 
 # Simple heuristics for parsing OCR text into fields
@@ -53,11 +83,11 @@ def _extract_from_text(text: str) -> dict:
     net_match = re.search(r"(\d+\s*(?:ml|mL|l|L))", joined)
     net_contents = net_match.group(1) if net_match else None
 
-    # Warning statement: find paragraph containing 'warning'
+    # Warning statement: preserve the complete warning, even when OCR wraps it.
     warning = None
-    for ln in lines:
+    for index, ln in enumerate(lines):
         if "warning" in ln.lower():
-            warning = ln
+            warning = " ".join(lines[index:])
             break
 
     return {
@@ -80,10 +110,12 @@ async def _call_provider(image_bytes: bytes) -> Optional[ExtractedLabel]:
     data_url = f"data:image/png;base64,{encoded_image}"
 
     prompt = (
-        "Extract the following fields from this liquor label and return valid JSON only. "
+        "Extract the following fields from this alcohol label and return valid JSON only. "
         "The JSON object must include exactly these keys with string values: "
         "brand_name, class_type, alcohol_content, net_contents, warning_statement. "
-        "If a field is not visible, use null. Do not include extra keys."
+        "For warning_statement, transcribe the complete statement exactly, preserving "
+        "capitalization, punctuation, and numbering while joining visual line wraps with "
+        "single spaces. If a field is not visible, use null. Do not include extra keys."
     )
 
     payload = {
@@ -107,17 +139,16 @@ async def _call_provider(image_bytes: bytes) -> Optional[ExtractedLabel]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            start = time.perf_counter()
+        async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
                 f"{base_url.rstrip('/')}/chat/completions",
                 json=payload,
                 headers=headers,
             )
-            latency = time.perf_counter() - start
             response.raise_for_status()
             data = response.json()
-    except Exception:
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        logger.warning("Vision provider request failed: %s", type(exc).__name__)
         return None
 
     content = data.get("choices", [{}])[0].get("message", {}).get("content")
@@ -131,15 +162,19 @@ async def _call_provider(image_bytes: bytes) -> Optional[ExtractedLabel]:
             parsed = content
         else:
             parsed = json.loads(str(content))
-    except Exception:
+    except (TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("Vision provider returned malformed JSON.")
         return None
 
     normalized = {
-        "brand_name": parsed.get("brand_name"),
-        "class_type": parsed.get("class_type"),
-        "alcohol_content": parsed.get("alcohol_content"),
-        "net_contents": parsed.get("net_contents"),
-        "warning_statement": parsed.get("warning_statement"),
+        field: None if parsed.get(field) is None else str(parsed[field])
+        for field in (
+            "brand_name",
+            "class_type",
+            "alcohol_content",
+            "net_contents",
+            "warning_statement",
+        )
     }
 
     return ExtractedLabel(**normalized)
@@ -151,29 +186,34 @@ async def extract_label_fields(image_bytes: bytes) -> ExtractedLabel:
     The OCR fallback uses `pytesseract` and simple heuristics to extract the
     five required fields so the app can run without paid LLM access.
     """
-    # 1) Try provider if configured
-    label = await _call_provider(image_bytes)
+    normalized_image = _normalize_image(image_bytes)
+
+    # 1) Try provider if configured.
+    label = await _call_provider(normalized_image)
     if label is not None:
         return label
 
     # 2) Fallback to local OCR
     try:
         import pytesseract
-    except Exception as exc:
-        raise RuntimeError(
-            "Tesseract OCR not available. Install pytesseract and the tesseract binary."
+    except ImportError as exc:
+        raise ExtractionUnavailableError(
+            "Image extraction is unavailable. Configure LLM_API_KEY or install Tesseract OCR."
         ) from exc
 
-    try:
-        img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    except Exception as exc:
-        raise RuntimeError("Invalid image data") from exc
+    if shutil.which("tesseract") is None:
+        raise ExtractionUnavailableError(
+            "Image extraction is unavailable. Configure a working LLM_API_KEY or install "
+            "the Tesseract system binary."
+        )
+
+    img = Image.open(BytesIO(normalized_image))
 
     try:
         ocr_text = pytesseract.image_to_string(img)
     except pytesseract.TesseractNotFoundError as exc:
-        raise RuntimeError(
-            "Tesseract binary not found. Install Tesseract and ensure it is on PATH."
+        raise ExtractionUnavailableError(
+            "Image extraction is unavailable because the Tesseract binary is not on PATH."
         ) from exc
 
     parsed = _extract_from_text(ocr_text)

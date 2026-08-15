@@ -1,5 +1,6 @@
 import os
 import pathlib
+import shutil
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +14,7 @@ app = FastAPI(title="Label Verify API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -22,6 +23,20 @@ app.add_middleware(
 @app.get("/health")
 async def health_check() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def readiness_check() -> dict:
+    provider_configured = bool(os.getenv("LLM_API_KEY"))
+    tesseract_available = shutil.which("tesseract") is not None
+    ready = provider_configured or tesseract_available
+    return {
+        "status": "ready" if ready else "not_ready",
+        "extraction": {
+            "vision_provider_configured": provider_configured,
+            "tesseract_available": tesseract_available,
+        },
+    }
 
 
 # Register API routes BEFORE static files (so they take priority)

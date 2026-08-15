@@ -1,9 +1,11 @@
-import json
+import time
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.comparison.matcher import compare_fields
+from app.extraction.errors import ExtractionUnavailableError, InvalidImageError
 from app.extraction.vision_client import extract_label_fields
+from app.routes.common import parse_application_data, read_image_upload
 
 router = APIRouter()
 
@@ -13,24 +15,20 @@ async def verify_label(
     file: UploadFile = File(...),
     application_data: str = Form(...),
 ):
+    started_at = time.perf_counter()
+    submitted = parse_application_data(application_data)
+    image_bytes = await read_image_upload(file)
     try:
-        submitted = json.loads(application_data)
-    except json.JSONDecodeError as exc:  # pragma: no cover - validation path
-        raise HTTPException(
-            status_code=400, detail="application_data must be valid JSON."
-        ) from exc
-
-    if not isinstance(submitted, dict):
-        raise HTTPException(
-            status_code=400, detail="application_data must be a JSON object."
-        )
-
-    image_bytes = await file.read()
-    extracted = await extract_label_fields(image_bytes)
+        extracted = await extract_label_fields(image_bytes)
+    except InvalidImageError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ExtractionUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     comparison = compare_fields(extracted, submitted)
 
     return {
         "filename": file.filename,
         "extracted": extracted.model_dump(),
         "comparison": comparison,
+        "processing_time_ms": round((time.perf_counter() - started_at) * 1000, 1),
     }

@@ -1,10 +1,13 @@
 import asyncio
 import json
+import time
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.comparison.matcher import compare_fields
+from app.extraction.errors import ExtractionUnavailableError, InvalidImageError
 from app.extraction.vision_client import extract_label_fields
+from app.routes.common import read_image_upload, validate_application
 
 router = APIRouter()
 
@@ -14,6 +17,7 @@ async def verify_batch(
     files: list[UploadFile] = File(...),
     application_data: str = Form("{}"),
 ):
+    batch_started_at = time.perf_counter()
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required.")
 
@@ -25,31 +29,61 @@ async def verify_batch(
         ) from exc
 
     if isinstance(payload, list):
-        submitted_items = payload
+        submitted_items = [validate_application(item) for item in payload]
         if len(submitted_items) != len(files):
             raise HTTPException(
                 status_code=400,
                 detail="When application_data is a list, it must match the number of uploaded files.",
             )
     elif isinstance(payload, dict):
-        submitted_items = [payload for _ in files]
+        submitted = validate_application(payload)
+        submitted_items = [submitted for _ in files]
     else:
         raise HTTPException(
             status_code=400,
             detail="application_data must be a JSON object or list of objects.",
         )
 
-    semaphore = asyncio.Semaphore(15)
+    semaphore = asyncio.Semaphore(5)
 
     async def process_file(file: UploadFile, submitted: dict):
+        file_started_at = time.perf_counter()
         async with semaphore:
-            image_bytes = await file.read()
-            extracted = await extract_label_fields(image_bytes)
+            try:
+                image_bytes = await read_image_upload(file)
+                extracted = await extract_label_fields(image_bytes)
+            except HTTPException as exc:
+                return {
+                    "filename": file.filename,
+                    "error": {"status": exc.status_code, "detail": exc.detail},
+                    "processing_time_ms": round(
+                        (time.perf_counter() - file_started_at) * 1000, 1
+                    ),
+                }
+            except InvalidImageError as exc:
+                return {
+                    "filename": file.filename,
+                    "error": {"status": 400, "detail": str(exc)},
+                    "processing_time_ms": round(
+                        (time.perf_counter() - file_started_at) * 1000, 1
+                    ),
+                }
+            except ExtractionUnavailableError as exc:
+                return {
+                    "filename": file.filename,
+                    "error": {"status": 503, "detail": str(exc)},
+                    "processing_time_ms": round(
+                        (time.perf_counter() - file_started_at) * 1000, 1
+                    ),
+                }
             comparison = compare_fields(extracted, submitted)
             return {
                 "filename": file.filename,
                 "extracted": extracted.model_dump(),
                 "comparison": comparison,
+                "processing_time_ms": round(
+                    (time.perf_counter() - file_started_at) * 1000, 1
+                ),
             }
 
     results = await asyncio.gather(
@@ -59,11 +93,17 @@ async def verify_batch(
         )
     )
 
+    completed = sum("comparison" in result for result in results)
+    failed = len(results) - completed
     return {
         "results": results,
         "progress": {
             "total": len(files),
-            "completed": len(results),
-            "status": "complete",
+            "completed": completed,
+            "failed": failed,
+            "status": "complete" if failed == 0 else "complete_with_errors",
+            "processing_time_ms": round(
+                (time.perf_counter() - batch_started_at) * 1000, 1
+            ),
         },
     }

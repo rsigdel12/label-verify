@@ -1,7 +1,9 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApplicationSubmission(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     brand_name: str | None = Field(default=None)
     class_type: str | None = Field(default=None)
     alcohol_content: str | None = Field(default=None)

@@ -1,13 +1,13 @@
 # Label Verify Prototype
 
-This project contains a minimal FastAPI prototype for AI-powered label verification. The app accepts an image plus submitted label data, extracts the key fields using a vision-capable LLM, compares them against the application values, and returns per-field pass/fail/needs-review status.
+This FastAPI prototype accepts an alcohol-label image plus submitted application data, extracts five key fields with a vision-capable model, compares printed values against the application, and returns per-field `pass`, `fail`, or `needs_review` results.
 
-Note: this environment does not include cloud deployment credentials, so the app was validated locally against a mock OpenAI-compatible provider to verify the full request path. The deployment steps below are included for a Render/Vercel/Railway account as a ready-to-run checklist.
+Images are processed in memory and are not retained. A local Tesseract fallback is available when its system binary is installed, but a vision provider is the recommended extraction path for deployment and difficult images.
 
 ## Structure
 
-- `backend/` - FastAPI application and tests
-- `frontend/` - lightweight HTML/JS uploader for local testing
+- `backend/` - FastAPI application, comparison logic, and tests
+- `frontend/` - accessible HTML/CSS/JS application form, uploader, and results view
 
 ## Local development
 
@@ -16,11 +16,11 @@ Note: this environment does not include cloud deployment credentials, so the app
 
    `cd backend && python -m pip install -e .`
 
-3. Copy the environment template:
+3. Copy the environment template (PowerShell shown):
 
-   `cp .env.example .env`
+   `Copy-Item .env.example .env`
 
-4. Set your provider variables in `backend/.env`:
+4. Set your provider variables in the process environment:
    - `LLM_API_KEY`
    - `LLM_BASE_URL` (default OpenAI-compatible endpoint)
    - `LLM_MODEL`
@@ -33,43 +33,46 @@ Note: this environment does not include cloud deployment credentials, so the app
 
    `cd ../frontend && python -m http.server 5500`
 
-7. Open the frontend at `http://127.0.0.1:5500` and submit a label image.
+7. Open the frontend at `http://127.0.0.1:5500`.
 
 ## API summary
 
-- `GET /health` — liveness check
-- `POST /verify` — single upload and comparison
-- `POST /verify/batch` — multiple uploads with concurrency cap (15)
+- `GET /health` - liveness check
+- `GET /ready` - reports whether a provider or Tesseract is configured
+- `POST /verify` - single upload and comparison
+- `POST /verify/batch` - multiple uploads with per-file failures and capped concurrency
 
-## Validation notes
+`/verify` expects multipart form data with an image in `file` and a JSON object string in `application_data`. Application values are `expected`; values extracted from the image are `actual`.
 
-The prototype has been validated locally with:
+Successful responses also include `processing_time_ms`, measured inside the API. The frontend displays this separately from total browser request time so provider work is not confused with network latency.
 
-- matcher unit tests (`4 passed`)
-- health check on `http://127.0.0.1:8000/health`
-- single-file `/verify` request returning pass/fail/needs-review data
-- batch `/verify/batch` request with multiple uploads and aggregated progress
-- frontend served at `http://127.0.0.1:5500` and CORS validated for the upload endpoint
+The vision-provider request has a five-second timeout aligned with the stakeholder target. The frontend flags processing results that exceed five seconds; Render cold starts and total network time are reported separately.
 
-The end-to-end request completed in roughly `0.42` seconds in the local mock-provider path, which remains comfortably under the intended 5-second budget.
+## Validation and fixtures
+
+Run the backend suite with `cd backend && python -m pytest -q`.
+
+The suite covers matcher behavior, semantic ABV and metric-volume equivalence, government-warning case and wording, real multipart API requests, corrupt or unsupported images, unavailable extraction services, batch partial failures, fixture consistency, and the frontend/API contract.
+
+The eight generated fixtures in `backend/tests/fixtures/` contain realistic distilled-spirits fields and the full federal government health warning. Each JSON sidecar separates `label_data`, `application_data`, and `expected_statuses`. Skew and glare are applied after rendering the text, so they exercise the content under test.
 
 ## Environment
 
-Copy `backend/.env.example` to `backend/.env` and set your provider configuration before enabling live extraction.
+Copy `backend/.env.example` to `backend/.env` and set your provider configuration before enabling live extraction. The app does not load `.env` files by itself unless the launcher does so.
 
-## Deployment checklist
+## Render deployment
 
-This project is ready to deploy to a platform such as Render, Railway, or a simple Vercel static frontend plus a separate backend service.
+The repository includes a Render Blueprint. `LLM_API_KEY` is declared with `sync: false`, so it must be entered as a secret in the Render dashboard and must never be committed.
 
-Recommended deployment pattern:
-
-1. Deploy the FastAPI backend as a web service with environment variables for `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL`.
-2. Deploy the frontend as static files and point the fetch URL to the deployed backend service.
-3. Confirm the deployed `/health` route is reachable from a fresh browser/session.
-4. Test `/verify` and `/verify/batch` against a live provider or mock endpoint.
+1. Set `LLM_API_KEY` in the Render service's Environment page.
+2. Deploy the latest commit and confirm `/health` returns `{"status":"ok"}`.
+3. Check `/ready`; `vision_provider_configured` should be `true`.
+4. Submit `fixture_01_clean_match.png` with `application_data` from its JSON sidecar.
+5. Inspect Render logs if the provider rejects the credentials, model, or outbound request.
 
 ## Trade-offs and constraints
 
-- There is no persistent storage in this version; uploaded files are processed in memory only.
-- There is no COLA or enterprise identity integration in the prototype.
-- Extraction is coupled to a single LLM provider configuration; swapping providers requires changing the request format in `app/extraction/vision_client.py`.
+- There is no persistent storage, COLA integration, or enterprise identity integration.
+- The provider call uses an OpenAI-compatible Chat Completions request. Other provider schemas require an adapter.
+- The five-field response verifies warning wording and capitalization, but it cannot prove that `GOVERNMENT WARNING:` is bold. Visual-format classification is a next step.
+- Mock latency is not a production benchmark. Measure representative requests on Render before claiming the five-second target.
