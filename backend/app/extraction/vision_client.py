@@ -35,10 +35,10 @@ def _normalize_image(image_bytes: bytes) -> bytes:
                     "The image dimensions are invalid or exceed 20 megapixels."
                 )
             image = image.convert("RGB")
-            # A 1200 px bound is sufficient for label text while keeping peak
+            # A 900 px bound is sufficient for label text while keeping peak
             # detector memory within small container limits (for example,
             # Render's free instance).
-            image.thumbnail((1200, 1200))
+            image.thumbnail((900, 900))
             output = BytesIO()
             image.save(output, format="PNG", optimize=True)
             return output.getvalue()
@@ -219,10 +219,10 @@ def _get_rapidocr_engine():
 
                 _rapidocr_engine = RapidOCR(
                     params={
-                        "Global.max_side_len": 1200,
+                        "Global.max_side_len": 900,
                         "Global.use_cls": False,
                         "Global.log_level": "warning",
-                        "Det.limit_side_len": 960,
+                        "Det.limit_side_len": 640,
                         "Det.limit_type": "max",
                         # ONNX Runtime otherwise creates a thread per detected
                         # CPU, increasing memory sharply on constrained hosts.
