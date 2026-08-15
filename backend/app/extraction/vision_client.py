@@ -7,6 +7,7 @@ import re
 import shutil
 import threading
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -17,6 +18,9 @@ from app.extraction.schema import ExtractedLabel
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_PIXELS = 20_000_000
+LOCAL_MODEL_DIR = Path(__file__).resolve().parent / "models"
+LOCAL_DETECTION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_det_tiny.onnx"
+LOCAL_RECOGNITION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_rec_tiny.onnx"
 _rapidocr_engine = None
 _rapidocr_init_lock = threading.Lock()
 _rapidocr_inference_lock = threading.Lock()
@@ -207,7 +211,7 @@ def rapidocr_available() -> bool:
         import rapidocr  # noqa: F401
     except ImportError:
         return False
-    return True
+    return LOCAL_DETECTION_MODEL.is_file() and LOCAL_RECOGNITION_MODEL.is_file()
 
 
 def _get_rapidocr_engine():
@@ -224,6 +228,8 @@ def _get_rapidocr_engine():
                         "Global.log_level": "warning",
                         "Det.limit_side_len": 384,
                         "Det.limit_type": "max",
+                        "Det.model_path": str(LOCAL_DETECTION_MODEL),
+                        "Rec.model_path": str(LOCAL_RECOGNITION_MODEL),
                         # ONNX Runtime otherwise creates a thread per detected
                         # CPU, increasing memory sharply on constrained hosts.
                         "EngineConfig.onnxruntime.intra_op_num_threads": 1,

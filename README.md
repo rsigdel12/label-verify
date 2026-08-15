@@ -9,7 +9,7 @@ Deployed application: <https://label-verify-p15v.onrender.com/>
 | Stakeholder need | Implementation |
 | --- | --- |
 | Obvious workflow for mixed technical comfort levels | One two-step screen, drag-and-drop upload, plain-language statuses, keyboard labels, responsive layout, and a one-click working sample |
-| Results in about five seconds | Bundled ONNX OCR avoids a network round trip; the clean fixture takes about 2.0 seconds initially and 1.1–1.3 seconds warm locally |
+| Results in about five seconds | Bundled tiny ONNX models avoid a network round trip; the clean fixture takes about 0.9 seconds initially and 0.2–0.3 seconds warm locally |
 | Compare label artwork with an application | The application form is the expected record; OCR text from the image is the actual value |
 | Required sample fields | Brand name, class/type, alcohol content, net contents, and complete government warning |
 | Human judgment for near matches | Brand casing/spacing is tolerant; a close but nonidentical regulated class/type is `needs_review` rather than silently approved |
@@ -33,9 +33,11 @@ The generated distilled-spirits fixtures follow the current TTB examples for the
 - `backend/tests/fixtures/` — eight generated label images with JSON application data and intended results.
 - `frontend/assets/sample-label.png` — self-contained sample used by the live demonstration.
 
-Images are normalized with Pillow, limited to 20 megapixels, and resized to a 650-pixel bound before OCR. RapidOCR's detector is capped at 384 pixels and ONNX Runtime uses one inference thread to control peak memory on small deployment instances. OCR runs in a worker thread so inference does not block the async server. A shared, lazily initialized engine avoids reloading the models on every request. Access to the engine is locked because a single inference session is reused safely. Batch requests preserve input order and report failures per file.
+Images are normalized with Pillow, limited to 20 megapixels, and resized to a 650-pixel bound before OCR. The repository includes RapidOCR's PP-OCRv6 tiny detection and recognition models, the detector is capped at 384 pixels, and ONNX Runtime uses one inference thread to control latency and peak memory on small deployment instances. OCR runs in a worker thread so inference does not block the async server. A shared, lazily initialized engine avoids reloading the models on every request. Access to the engine is locked because a single inference session is reused safely. Batch requests preserve input order and report failures per file.
 
 An optional OpenAI-compatible vision provider and a system Tesseract installation remain as fallback paths. The local engine runs first to keep the normal path fast and functional on Render without secrets or outbound access.
+
+RapidOCR and the bundled PP-OCRv6 model assets are used under the Apache-2.0 license.
 
 ### Comparison rules
 
