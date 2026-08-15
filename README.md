@@ -9,7 +9,7 @@ Deployed application: <https://label-verify-p15v.onrender.com/>
 | Stakeholder need | Implementation |
 | --- | --- |
 | Obvious workflow for mixed technical comfort levels | One two-step screen, drag-and-drop upload, plain-language statuses, keyboard labels, responsive layout, and a one-click working sample |
-| Results in about five seconds | Bundled ONNX OCR avoids a network round trip; clean fixture cold start is about 3.0 seconds and warm requests are about 1.7–1.9 seconds locally |
+| Results in about five seconds | Bundled ONNX OCR avoids a network round trip; clean fixture cold start is about 3.4 seconds and warm requests are about 2.3–2.5 seconds locally |
 | Compare label artwork with an application | The application form is the expected record; OCR text from the image is the actual value |
 | Required sample fields | Brand name, class/type, alcohol content, net contents, and complete government warning |
 | Human judgment for near matches | Brand casing/spacing is tolerant; a close but nonidentical regulated class/type is `needs_review` rather than silently approved |
@@ -33,7 +33,7 @@ The generated distilled-spirits fixtures follow the current TTB examples for the
 - `backend/tests/fixtures/` — eight generated label images with JSON application data and intended results.
 - `frontend/assets/sample-label.png` — self-contained sample used by the live demonstration.
 
-Images are normalized with Pillow and limited to 20 megapixels. RapidOCR runs in a worker thread so inference does not block the async server. A shared, lazily initialized engine avoids reloading the ONNX models on every request. Access to the engine is locked because a single inference session is reused safely. Batch requests preserve input order and report failures per file.
+Images are normalized with Pillow, limited to 20 megapixels, and resized to a 1200-pixel bound before OCR. RapidOCR's detector is capped at 960 pixels and ONNX Runtime uses one inference thread to control peak memory on small deployment instances. OCR runs in a worker thread so inference does not block the async server. A shared, lazily initialized engine avoids reloading the models on every request. Access to the engine is locked because a single inference session is reused safely. Batch requests preserve input order and report failures per file.
 
 An optional OpenAI-compatible vision provider and a system Tesseract installation remain as fallback paths. The local engine runs first to keep the normal path fast and functional on Render without secrets or outbound access.
 

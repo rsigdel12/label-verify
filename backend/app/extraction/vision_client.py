@@ -35,7 +35,10 @@ def _normalize_image(image_bytes: bytes) -> bytes:
                     "The image dimensions are invalid or exceed 20 megapixels."
                 )
             image = image.convert("RGB")
-            image.thumbnail((2400, 2400))
+            # A 1200 px bound is sufficient for label text while keeping peak
+            # detector memory within small container limits (for example,
+            # Render's free instance).
+            image.thumbnail((1200, 1200))
             output = BytesIO()
             image.save(output, format="PNG", optimize=True)
             return output.getvalue()
@@ -214,7 +217,19 @@ def _get_rapidocr_engine():
             if _rapidocr_engine is None:
                 from rapidocr import RapidOCR
 
-                _rapidocr_engine = RapidOCR()
+                _rapidocr_engine = RapidOCR(
+                    params={
+                        "Global.max_side_len": 1200,
+                        "Global.use_cls": False,
+                        "Global.log_level": "warning",
+                        "Det.limit_side_len": 960,
+                        "Det.limit_type": "max",
+                        # ONNX Runtime otherwise creates a thread per detected
+                        # CPU, increasing memory sharply on constrained hosts.
+                        "EngineConfig.onnxruntime.intra_op_num_threads": 1,
+                        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+                    }
+                )
     return _rapidocr_engine
 
 
@@ -222,7 +237,7 @@ def _run_rapidocr(image_bytes: bytes) -> str:
     """Run the shared ONNX OCR session safely outside the async event loop."""
     engine = _get_rapidocr_engine()
     with _rapidocr_inference_lock:
-        result = engine(image_bytes)
+        result = engine(image_bytes, use_cls=False)
     texts = tuple(result.txts or ())
     return "\n".join(texts)
 
