@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 
@@ -19,9 +20,38 @@ women should not drink alcoholic beverages during pregnancy.
 
     assert parsed["brand_name"] == "ACME SPIRITS"
     assert parsed["class_type"] == "Kentucky Straight Bourbon Whiskey"
-    assert parsed["alcohol_content"] == "45% Alc."
+    assert parsed["alcohol_content"] == "45% Alc. by Vol."
     assert parsed["net_contents"] == "750 mL"
     assert parsed["warning_statement"].endswith("during pregnancy.")
+
+
+def test_ocr_parser_joins_wrapped_class_and_excludes_batch_code():
+    text = """Acme Spirits
+KENTUCKY STRAIGHT BOURBON
+WHISKEY
+45% Alc. by Vol.
+NET CONTENTS 750 mL
+GOVERNMENT WARNING: Exact warning.
+BATCH 26-0815
+"""
+
+    parsed = vision_client._extract_from_text(text)
+
+    assert parsed["class_type"] == "KENTUCKY STRAIGHT BOURBON WHISKEY"
+    assert parsed["warning_statement"] == "GOVERNMENT WARNING: Exact warning."
+
+
+def test_bundled_local_ocr_reads_clean_fixture(monkeypatch):
+    fixture = Path(__file__).parent / "fixtures" / "fixture_01_clean_match.png"
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    extracted = asyncio.run(vision_client.extract_label_fields(fixture.read_bytes()))
+
+    assert extracted.brand_name == "Acme Spirits"
+    assert extracted.class_type == "KENTUCKY STRAIGHT BOURBON WHISKEY"
+    assert extracted.alcohol_content == "45% Alc. by Vol."
+    assert extracted.net_contents == "750 mL"
+    assert extracted.warning_statement.endswith("may cause health problems.")
 
 
 def test_provider_request_parses_structured_label(monkeypatch):

@@ -1,78 +1,114 @@
-# Label Verify Prototype
+# Label Verify
 
-This FastAPI prototype accepts an alcohol-label image plus submitted application data, extracts five key fields with a vision-capable model, compares printed values against the application, and returns per-field `pass`, `fail`, or `needs_review` results.
+A standalone proof of concept for comparing alcohol label artwork with an approved application. Reviewers upload one or more label images, enter the application values, and receive field-level `pass`, `fail`, or `needs_review` results with measured processing time.
 
-Images are processed in memory and are not retained. A local Tesseract fallback is available when its system binary is installed, but a vision provider is the recommended extraction path for deployment and difficult images.
+Deployed application: <https://label-verify-p15v.onrender.com/>
 
-## Structure
+## What the prototype covers
 
-- `backend/` - FastAPI application, comparison logic, and tests
-- `frontend/` - accessible HTML/CSS/JS application form, uploader, and results view
+| Stakeholder need | Implementation |
+| --- | --- |
+| Obvious workflow for mixed technical comfort levels | One two-step screen, drag-and-drop upload, plain-language statuses, keyboard labels, responsive layout, and a one-click working sample |
+| Results in about five seconds | Bundled ONNX OCR avoids a network round trip; clean fixture cold start is about 3.0 seconds and warm requests are about 1.7–1.9 seconds locally |
+| Compare label artwork with an application | The application form is the expected record; OCR text from the image is the actual value |
+| Required sample fields | Brand name, class/type, alcohol content, net contents, and complete government warning |
+| Human judgment for near matches | Brand casing/spacing is tolerant; a close but nonidentical regulated class/type is `needs_review` rather than silently approved |
+| Exact warning language and capitalization | Warning comparison preserves case, punctuation, spelling, numbering, and order; visual/OCR whitespace is ignored |
+| Imperfect photos | Test coverage includes 7-degree skew and simulated glare |
+| Peak-season batch work | Multi-select in the same uploader calls the batch API and shows results per file |
+| Restricted outbound network | The default extraction path is local RapidOCR + ONNX Runtime; no external API or secret is required |
+| Prototype privacy | Uploads are validated, processed in memory, and not retained |
+| Useful error handling | Unsupported, empty, oversized, corrupt, unavailable, timeout, and per-file batch failures return actionable messages |
 
-## Local development
+The app intentionally assists rather than replaces the compliance agent. The warning's wording and capitalization are checked, but OCR text alone cannot prove that the `GOVERNMENT WARNING:` heading is visually bold. The reviewer must confirm styling and any requirements outside the five prototype fields.
 
-1. Create and activate a virtual environment.
-2. Install dependencies:
+### Fixture validity
 
-   `cd backend && python -m pip install -e .`
+The generated distilled-spirits fixtures follow the current TTB examples for the fields in scope: brand, class/type, and alcohol content appear together; net contents uses the accepted `750 mL` form; and the standard warning heading is uppercase and bold while the warning body is regular weight. The domestic label also includes `DISTILLED AND BOTTLED BY ACME SPIRITS — LOUISVILLE, KENTUCKY`; country of origin is not applicable to this domestic example. See TTB's [mandatory distilled-spirits information](https://www.ttb.gov/regulated-commodities/beverage-alcohol/distilled-spirits/ds-labeling-home/ds-brand-label), [health warning](https://www.ttb.gov/regulated-commodities/beverage-alcohol/distilled-spirits/ds-labeling-home/ds-health-warning), and [net contents](https://www.ttb.gov/regulated-commodities/beverage-alcohol/distilled-spirits/ds-labeling-home/ds-net-contents) guidance.
 
-3. Copy the environment template (PowerShell shown):
+## Architecture and decisions
 
-   `Copy-Item .env.example .env`
+- `backend/app/` — FastAPI routes, validation, local/provider extraction, and comparison rules.
+- `frontend/` — dependency-free HTML, CSS, and JavaScript served by FastAPI.
+- `backend/tests/fixtures/` — eight generated label images with JSON application data and intended results.
+- `frontend/assets/sample-label.png` — self-contained sample used by the live demonstration.
 
-4. Set your provider variables in the process environment:
-   - `LLM_API_KEY`
-   - `LLM_BASE_URL` (default OpenAI-compatible endpoint)
-   - `LLM_MODEL`
+Images are normalized with Pillow and limited to 20 megapixels. RapidOCR runs in a worker thread so inference does not block the async server. A shared, lazily initialized engine avoids reloading the ONNX models on every request. Access to the engine is locked because a single inference session is reused safely. Batch requests preserve input order and report failures per file.
 
-5. Start the API:
+An optional OpenAI-compatible vision provider and a system Tesseract installation remain as fallback paths. The local engine runs first to keep the normal path fast and functional on Render without secrets or outbound access.
 
-   `uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`
+### Comparison rules
 
-6. Serve the frontend locally:
+- Brand name: case-insensitive fuzzy comparison with a 90% threshold.
+- Class/type: exact normalized text passes; close fuzzy text requires review; materially different text fails.
+- Alcohol content: numeric ABV is compared, so equivalent formats such as `45% Alc. by Vol.` and `45% Alcohol by Volume` pass.
+- Net contents: metric units are normalized, so `750 mL` and `0.75 L` are equivalent.
+- Government warning: case, punctuation, spelling, numbering, and word order must match; whitespace caused by wrapping or OCR segmentation is ignored.
+- Missing application or extraction values require manual review.
 
-   `cd ../frontend && python -m http.server 5500`
+## Run locally
 
-7. Open the frontend at `http://127.0.0.1:5500`.
+Python 3.11 or newer is required.
 
-## API summary
+```powershell
+cd label-verify\backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
 
-- `GET /health` - liveness check
-- `GET /ready` - reports whether a provider or Tesseract is configured
-- `POST /verify` - single upload and comparison
-- `POST /verify/batch` - multiple uploads with per-file failures and capped concurrency
+Open <http://127.0.0.1:8000/>. FastAPI serves both the API and frontend, so a separate static-file server is neither needed nor recommended.
 
-`/verify` expects multipart form data with an image in `file` and a JSON object string in `application_data`. Application values are `expected`; values extracted from the image are `actual`.
+No environment variable is required. To enable the optional provider fallback, set:
 
-Successful responses also include `processing_time_ms`, measured inside the API. The frontend displays this separately from total browser request time so provider work is not confused with network latency.
+- `LLM_API_KEY`
+- `LLM_BASE_URL` (defaults to `https://api.openai.com/v1`)
+- `LLM_MODEL` (defaults to `gpt-4o-mini`)
 
-The vision-provider request has a five-second timeout aligned with the stakeholder target. The frontend flags processing results that exceed five seconds; Render cold starts and total network time are reported separately.
+## Test and evaluate
 
-## Validation and fixtures
+Run the automated suite:
 
-Run the backend suite with `cd backend && python -m pytest -q`.
+```powershell
+cd label-verify\backend
+python -m pytest -q
+```
 
-The suite covers matcher behavior, semantic ABV and metric-volume equivalence, government-warning case and wording, real multipart API requests, corrupt or unsupported images, unavailable extraction services, batch partial failures, fixture consistency, and the frontend/API contract.
+The suite contains 30 tests, including real local OCR through both single and batch multipart endpoints. It also covers matching semantics, validation and error responses, fixture integrity, timing fields, and the frontend/API contract.
 
-The eight generated fixtures in `backend/tests/fixtures/` contain realistic distilled-spirits fields and the full federal government health warning. Each JSON sidecar separates `label_data`, `application_data`, and `expected_statuses`. Skew and glare are applied after rendering the text, so they exercise the content under test.
+Run the complete real-OCR fixture evaluation:
 
-## Environment
+```powershell
+python tests\run_ocr_extraction.py
+```
 
-Copy `backend/.env.example` to `backend/.env` and set your provider configuration before enabling live extraction. The app does not load `.env` files by itself unless the launcher does so.
+Expected result: all eight fixtures pass their intended outcome. The set includes a clean match, brand-case variation, incorrect warning case, ABV mismatch, class/type typo requiring review, net-contents mismatch, skew, and glare.
+
+## API
+
+- `GET /health` — process liveness.
+- `GET /ready` — local OCR, optional provider, and Tesseract readiness.
+- `POST /verify` — one image in `file` plus JSON string in `application_data`.
+- `POST /verify/batch` — images in `files` plus either one shared application object or one object per image.
+
+Successful single responses include `filename`, `extracted`, `comparison`, and `processing_time_ms`. Batch responses include ordered per-file results and a `progress` summary with total processing time.
 
 ## Render deployment
 
-The repository includes a Render Blueprint. `LLM_API_KEY` is declared with `sync: false`, so it must be entered as a secret in the Render dashboard and must never be committed.
+The included `render.yaml` installs the package and starts the single FastAPI service. RapidOCR model files ship with the installed package, so the deployed app works without `LLM_API_KEY` or a Tesseract system package.
 
-1. Set `LLM_API_KEY` in the Render service's Environment page.
-2. Deploy the latest commit and confirm `/health` returns `{"status":"ok"}`.
-3. Check `/ready`; `vision_provider_configured` should be `true`.
-4. Submit `fixture_01_clean_match.png` with `application_data` from its JSON sidecar.
-5. Inspect Render logs if the provider rejects the credentials, model, or outbound request.
+1. Push the latest commit to the repository connected to Render.
+2. Wait for the build to install `rapidocr` and `onnxruntime`.
+3. Confirm `/ready` reports `"status":"ready"` and `"local_ocr_available":true`.
+4. Open the home page, choose **Try a working sample**, then **Verify label**.
+5. Confirm all five sample fields pass and processing time is displayed.
 
-## Trade-offs and constraints
+The first request after a free-tier cold start can include platform startup delay. The UI reports backend processing separately from total browser request time so that distinction is visible.
 
-- There is no persistent storage, COLA integration, or enterprise identity integration.
-- The provider call uses an OpenAI-compatible Chat Completions request. Other provider schemas require an adapter.
-- The five-field response verifies warning wording and capitalization, but it cannot prove that `GOVERNMENT WARNING:` is bold. Visual-format classification is a next step.
-- Mock latency is not a production benchmark. Measure representative requests on Render before claiming the five-second target.
+## Known prototype boundaries
+
+- No COLA integration, identity system, persistent storage, or production retention policy.
+- The five sample fields are not a complete beverage-specific legal review. Producer address, country-of-origin rules, font size, contrast, placement, and bold styling remain agent checks.
+- Batch UI applies one application to all selected images; the API additionally supports one application object per file.
+- Generated fixtures are deterministic regression inputs, not a substitute for evaluation on a representative set of real bottle photographs.

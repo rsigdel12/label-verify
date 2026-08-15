@@ -3,185 +3,68 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta
-      name="description"
-      content="Compare an alcohol label image with submitted application details."
-    />
+    <meta name="description" content="Compare alcohol label artwork with approved application details." />
     <title>Label Verify | Alcohol Label Review</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=4" />
   </head>
   <body>
     <a class="skip-link" href="#mainContent">Skip to main content</a>
-
     <header class="site-header">
       <div class="header-inner">
         <a class="brand" href="/" aria-label="Label Verify home">
-          <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 24 24" role="img">
-              <path d="M4 4h11l5 5v11H4V4Z" />
-              <path d="M15 4v5h5M8 14l2.2 2.2L16 10.5" />
-            </svg>
-          </span>
-          <span>Label Verify</span>
+          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 3h10l4 4v14H5V3Z"/><path d="M15 3v5h5M8.5 14l2 2 4.5-5"/></svg></span>
+          <span>Label Verify</span><span class="prototype-label">Prototype</span>
         </a>
-        <span class="prototype-badge">Prototype</span>
+        <div id="serviceStatus" class="service-status checking" role="status" aria-live="polite"><span class="status-dot" aria-hidden="true"></span><span class="status-text">Checking service</span></div>
       </div>
     </header>
 
     <main id="mainContent" class="page-shell">
-      <section class="hero" aria-labelledby="pageTitle">
-        <p class="eyebrow">AI-assisted compliance review</p>
-        <h1 id="pageTitle">Verify an alcohol label in a few clear steps</h1>
-        <p class="hero-copy">
-          Enter the approved application details, upload the label artwork, and
-          review each detected match. The tool assists review; an agent makes
-          the final compliance decision.
-        </p>
+      <section class="intro" aria-labelledby="pageTitle">
+        <div><p class="eyebrow">AI-assisted compliance review</p><h1 id="pageTitle">Compare a label with its application</h1><p>Upload the label artwork and enter the approved application values. You will get a clear field-by-field result in about five seconds.</p></div>
+        <button id="sampleButton" class="sample-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h10l4 4v14H5V3Z"/><path d="M15 3v5h5M8 12h8M8 16h6"/></svg>Try a working sample</button>
       </section>
 
-      <div id="errorBanner" class="alert alert-error hidden" role="alert" tabindex="-1">
-        <span class="alert-icon" aria-hidden="true">!</span>
-        <div>
-          <strong>We could not complete the verification.</strong>
-          <p id="errorMessage"></p>
-        </div>
-      </div>
+      <div id="noticeBanner" class="alert alert-success hidden" role="status" aria-live="polite"><span aria-hidden="true">✓</span><p id="noticeMessage"></p></div>
+      <div id="errorBanner" class="alert alert-error hidden" role="alert" tabindex="-1"><span aria-hidden="true">!</span><div><strong>Verification could not be completed</strong><p id="errorMessage"></p></div></div>
 
-      <form id="verifyForm" class="workflow">
-        <section class="card application-card" aria-labelledby="applicationHeading">
-          <div class="card-heading">
-            <div>
-              <span class="step-number">1</span>
-              <div>
-                <p class="step-label">Application data</p>
-                <h2 id="applicationHeading">What was submitted for approval?</h2>
-              </div>
-            </div>
-            <button id="sampleButton" class="text-button" type="button">
-              Load sample data
-            </button>
-          </div>
-
-          <p class="section-help">
-            These values are the expected record. They will be compared with
-            text detected on the uploaded label.
-          </p>
-
-          <div class="field-grid">
-            <div class="form-field">
-              <label for="brandName">Brand name</label>
-              <input id="brandName" name="brand_name" type="text" placeholder="e.g., Acme Spirits" autocomplete="off" required />
-            </div>
-            <div class="form-field">
-              <label for="classType">Class or type</label>
-              <input id="classType" name="class_type" type="text" placeholder="e.g., Kentucky Straight Bourbon Whiskey" autocomplete="off" required />
-            </div>
-            <div class="form-field">
-              <label for="alcoholContent">Alcohol content</label>
-              <input id="alcoholContent" name="alcohol_content" type="text" placeholder="e.g., 45% Alc. by Vol." autocomplete="off" required />
-            </div>
-            <div class="form-field">
-              <label for="netContents">Net contents</label>
-              <input id="netContents" name="net_contents" type="text" placeholder="e.g., 750 mL" autocomplete="off" required />
-            </div>
-            <div class="form-field field-wide">
-              <div class="label-row">
-                <label for="warningStatement">Government warning statement</label>
-                <span>Exact wording and capitalization</span>
-              </div>
-              <textarea id="warningStatement" name="warning_statement" rows="6" placeholder="Enter the warning statement from the approved application." required></textarea>
-            </div>
-          </div>
-        </section>
-
-        <section class="card upload-card" aria-labelledby="uploadHeading">
-          <div class="card-heading compact">
-            <div>
-              <span class="step-number">2</span>
-              <div>
-                <p class="step-label">Label artwork</p>
-                <h2 id="uploadHeading">Upload the label image</h2>
-              </div>
-            </div>
-          </div>
-
+      <form id="verifyForm" class="workflow-card">
+        <section class="workflow-section upload-section" aria-labelledby="uploadHeading">
+          <div class="section-heading"><span class="step-number">1</span><div><p>Label artwork</p><h2 id="uploadHeading">Choose label image</h2></div></div>
           <div id="uploadArea" class="upload-area">
-            <input id="fileInput" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
-            <label id="uploadLabel" for="fileInput" class="file-label">
-              <span class="upload-illustration" aria-hidden="true">
-                <svg viewBox="0 0 48 48" role="img">
-                  <rect x="7" y="9" width="34" height="30" rx="4" />
-                  <circle cx="17" cy="19" r="3" />
-                  <path d="m11 34 9-9 6 6 4-4 7 7M24 6v12M19 11l5-5 5 5" />
-                </svg>
-              </span>
-              <strong>Choose an image or drag it here</strong>
-              <span>PNG, JPEG, WEBP, or GIF up to 25 MB</span>
+            <input id="fileInput" class="visually-hidden" type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif" />
+            <label for="fileInput" class="file-label">
+              <span class="upload-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M6 4h14l6 6v18H6V4Z"/><path d="M20 4v7h7M11 20l4-4 3 3 2-2 3 3"/></svg></span>
+              <strong>Drop images here or browse</strong><span>PNG, JPEG, WEBP, or GIF · 25 MB each</span><span class="batch-hint">Select multiple files for batch review</span>
             </label>
           </div>
-
-          <div id="filePreview" class="file-preview hidden">
-            <img id="previewImage" alt="Preview of selected alcohol label" />
-            <div class="file-details">
-              <strong id="fileName"></strong>
-              <span id="fileSize"></span>
-            </div>
-            <button id="removeFileButton" class="icon-button" type="button">Remove</button>
-          </div>
-
-          <p class="privacy-note">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6l-7-3Z" />
-              <path d="m9 12 2 2 4-5" />
-            </svg>
-            Images are processed in memory and are not stored by this prototype.
-          </p>
-
-          <button id="submitButton" class="primary-button" type="submit">
-            <span class="button-label">Verify label</span>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
-          </button>
+          <div id="filePreview" class="file-preview hidden"><img id="previewImage" alt="Preview of the first selected alcohol label" /><div class="file-details"><strong id="fileName"></strong><span id="fileSize"></span></div><button id="removeFileButton" class="remove-button" type="button">Remove</button></div>
+          <p class="privacy-note">Images are processed in memory and are not stored.</p>
         </section>
+
+        <section class="workflow-section application-section" aria-labelledby="applicationHeading">
+          <div class="section-heading"><span class="step-number">2</span><div><p>Approved record</p><h2 id="applicationHeading">Enter application values</h2></div></div>
+          <p class="section-help">These are the expected values. For a batch, the same application is compared with every selected image.</p>
+          <div class="field-grid">
+            <div class="form-field"><label for="brandName">Brand name</label><input id="brandName" name="brand_name" type="text" placeholder="Acme Spirits" autocomplete="off" required /></div>
+            <div class="form-field"><label for="classType">Class or type</label><input id="classType" name="class_type" type="text" placeholder="Kentucky Straight Bourbon Whiskey" autocomplete="off" required /></div>
+            <div class="form-field"><label for="alcoholContent">Alcohol content</label><input id="alcoholContent" name="alcohol_content" type="text" placeholder="45% Alc. by Vol." autocomplete="off" required /></div>
+            <div class="form-field"><label for="netContents">Net contents</label><input id="netContents" name="net_contents" type="text" placeholder="750 mL" autocomplete="off" required /></div>
+            <div class="form-field field-wide"><div class="label-row"><label for="warningStatement">Government warning statement</label><span>Exact case and wording</span></div><textarea id="warningStatement" name="warning_statement" rows="4" placeholder="Enter the complete approved warning statement." required></textarea></div>
+          </div>
+        </section>
+
+        <div class="form-actions"><p><strong>Automated check only.</strong> A compliance agent makes the final decision.</p><button id="submitButton" class="primary-button" type="submit" disabled><span class="button-label">Verify label</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button></div>
       </form>
 
-      <section id="loading" class="card loading-card hidden" aria-live="polite">
-        <div class="spinner" aria-hidden="true"></div>
-        <div>
-          <h2>Analyzing the label</h2>
-          <p>Extracting fields and comparing them with the application.</p>
-          <span id="loadingElapsed" class="elapsed">Elapsed: 0.0 seconds</span>
-        </div>
-      </section>
-
+      <section id="loading" class="loading-card hidden" aria-live="polite"><span class="spinner" aria-hidden="true"></span><div><h2>Reading and comparing the label</h2><p id="loadingMessage">This usually takes less than five seconds.</p><span id="loadingElapsed">Elapsed: 0.0 seconds</span></div></section>
       <section id="resultsSection" class="results-section hidden" aria-labelledby="resultsHeading" aria-live="polite" tabindex="-1">
-        <div id="resultSummary" class="result-summary">
-          <span id="summaryIcon" class="summary-icon" aria-hidden="true"></span>
-          <div class="summary-copy">
-            <p class="step-label">Verification result</p>
-            <h2 id="resultsHeading"></h2>
-            <p id="resultCounts"></p>
-          </div>
-          <dl class="timing-list">
-            <div><dt>Processing (target: 5s)</dt><dd id="serverTime">--</dd></div>
-            <div><dt>Total request</dt><dd id="roundTripTime">--</dd></div>
-          </dl>
-        </div>
-
-        <div class="results-heading-row">
-          <div>
-            <h2>Field-by-field comparison</h2>
-            <p>Expected application values compared with detected label text.</p>
-          </div>
-          <button id="verifyAnotherButton" class="secondary-button" type="button">Verify another label</button>
-        </div>
+        <div id="resultSummary" class="result-summary"><span id="summaryIcon" class="summary-icon" aria-hidden="true"></span><div class="summary-copy"><p>Verification result</p><h2 id="resultsHeading"></h2><span id="resultCounts"></span></div><dl class="timing-list"><div><dt>Processing</dt><dd id="serverTime">—</dd></div><div><dt>Total request</dt><dd id="roundTripTime">—</dd></div></dl></div>
+        <div class="results-toolbar"><div><h2>Field comparison</h2><p>Application values are expected; label text is detected.</p></div><button id="verifyAnotherButton" class="secondary-button" type="button">Start another review</button></div>
         <div id="resultFields" class="result-fields"></div>
       </section>
     </main>
-
-    <footer class="site-footer">
-      <p>Label Verify prototype &middot; AI-assisted review &middot; Human decision required</p>
-    </footer>
-
-    <script src="./upload.js"></script>
+    <footer class="site-footer">Label Verify · Standalone proof of concept · No images retained</footer>
+    <script src="./upload.js?v=4"></script>
   </body>
 </html>

@@ -98,6 +98,19 @@ def test_warning_visual_line_wraps_do_not_create_false_failure():
     assert result["warning_statement"]["status"] == "pass"
 
 
+def test_warning_ocr_joined_words_do_not_create_false_failure():
+    extracted = ExtractedLabel(
+        warning_statement="GOVERNMENT WARNING: alcoholic beveragesduring pregnancy."
+    )
+    submitted = {
+        "warning_statement": "GOVERNMENT WARNING: alcoholic beverages during pregnancy."
+    }
+
+    result = compare_fields(extracted, submitted)
+
+    assert result["warning_statement"]["status"] == "pass"
+
+
 def test_missing_extraction_requires_review():
     result = compare_fields(ExtractedLabel(), {"brand_name": "Acme Spirits"})
 

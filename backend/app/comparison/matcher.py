@@ -118,10 +118,11 @@ def _compare_warning_statement(expected: str | None, actual: str | None) -> dict
     if expected is None or actual is None:
         return _comparison("needs_review", expected, actual)
 
-    # Line wrapping is a visual layout detail, not a wording difference. Casing,
-    # punctuation, and all words remain exact after whitespace is collapsed.
-    normalized_expected = " ".join(str(expected).strip().split())
-    normalized_actual = " ".join(str(actual).strip().split())
+    # Whitespace is a layout/OCR segmentation detail. Removing it avoids false
+    # failures when glare joins two adjacent words, while casing, punctuation,
+    # spelling, numbering, and word order must still be exact.
+    normalized_expected = re.sub(r"\s+", "", str(expected).strip())
+    normalized_actual = re.sub(r"\s+", "", str(actual).strip())
     status = "pass" if normalized_expected == normalized_actual else "fail"
     return _comparison(status, expected, actual)
 

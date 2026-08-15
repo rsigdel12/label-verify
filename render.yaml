@@ -8,9 +8,3 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
-      - key: LLM_API_KEY
-        sync: false
-      - key: LLM_BASE_URL
-        value: https://api.openai.com/v1
-      - key: LLM_MODEL
-        value: gpt-4o-mini

@@ -1,5 +1,6 @@
 import io
 import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -9,6 +10,7 @@ from app.extraction.schema import ExtractedLabel
 from app.main import app
 
 client = TestClient(app)
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def image_bytes() -> bytes:
@@ -44,6 +46,37 @@ def test_verify_success(monkeypatch):
         result["status"] == "pass"
         for result in response.json()["comparison"].values()
     )
+
+
+def test_readiness_reports_bundled_local_ocr():
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert response.json()["extraction"]["local_ocr_available"] is True
+
+
+def test_verify_clean_fixture_end_to_end():
+    metadata = json.loads(
+        (FIXTURES / "fixture_01_clean_match.json").read_text(encoding="utf-8")
+    )
+    response = client.post(
+        "/verify",
+        files={
+            "file": (
+                "fixture_01_clean_match.png",
+                (FIXTURES / "fixture_01_clean_match.png").read_bytes(),
+                "image/png",
+            )
+        },
+        data={"application_data": json.dumps(metadata["application_data"])},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["processing_time_ms"] < 5000
+    assert {item["status"] for item in response.json()["comparison"].values()} == {
+        "pass"
+    }
 
 
 def test_verify_rejects_invalid_json():
@@ -129,3 +162,37 @@ def test_batch_reports_per_file_errors(monkeypatch):
     assert payload["progress"]["processing_time_ms"] >= 0
     assert payload["results"][1]["error"]["status"] == 415
     assert payload["results"][1]["processing_time_ms"] >= 0
+
+
+def test_batch_verifies_multiple_real_images():
+    metadata = json.loads(
+        (FIXTURES / "fixture_01_clean_match.json").read_text(encoding="utf-8")
+    )
+    response = client.post(
+        "/verify/batch",
+        files=[
+            (
+                "files",
+                (
+                    name,
+                    (FIXTURES / name).read_bytes(),
+                    "image/png",
+                ),
+            )
+            for name in (
+                "fixture_01_clean_match.png",
+                "fixture_02_brand_case_variation.png",
+            )
+        ],
+        data={"application_data": json.dumps(metadata["application_data"])},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["progress"]["status"] == "complete"
+    assert payload["progress"]["completed"] == 2
+    assert all(
+        item["status"] == "pass"
+        for result in payload["results"]
+        for item in result["comparison"].values()
+    )

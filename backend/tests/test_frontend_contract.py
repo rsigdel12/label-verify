@@ -46,6 +46,18 @@ def test_frontend_submits_user_values_instead_of_a_fixed_verification_payload():
     script = (FRONTEND / "upload.js").read_text(encoding="utf-8")
 
     assert "function applicationPayload()" in script
-    assert 'document.getElementById("brandName").value.trim()' in script
-    assert 'requestBody.append("application_data", JSON.stringify(applicationPayload()))' in script
+    assert 'brand_name:byId("brandName").value.trim()' in script
+    assert 'requestBody.append("application_data",JSON.stringify(applicationPayload()))' in script
     assert "data.processing_time_ms" in script
+
+
+def test_frontend_sample_and_batch_workflows_are_connected():
+    script = (FRONTEND / "upload.js").read_text(encoding="utf-8")
+    fixture = Path(__file__).parent / "fixtures" / "fixture_01_clean_match.png"
+
+    assert (FRONTEND / "assets" / "sample-label.png").stat().st_size > 0
+    assert (FRONTEND / "assets" / "sample-label.png").read_bytes() == fixture.read_bytes()
+    assert 'fetch("./assets/sample-label.png?v=4")' in script
+    assert 'fetch("/ready"' in script
+    assert 'requestBody.append("files",file)' in script
+    assert 'isBatch?"/verify/batch":"/verify"' in script

@@ -1,9 +1,11 @@
+import asyncio
 import base64
 import json
 import logging
 import os
 import re
 import shutil
+import threading
 from io import BytesIO
 from typing import Optional
 
@@ -15,6 +17,9 @@ from app.extraction.schema import ExtractedLabel
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_PIXELS = 20_000_000
+_rapidocr_engine = None
+_rapidocr_init_lock = threading.Lock()
+_rapidocr_inference_lock = threading.Lock()
 
 
 def _normalize_image(image_bytes: bytes) -> bytes:
@@ -50,45 +55,57 @@ def _extract_from_text(text: str) -> dict:
     # Brand: assume first non-empty line
     brand = lines[0] if lines else None
 
-    # Class/type: look for known keywords or use second line
+    # Class/type normally sits between the brand and alcohol declaration. OCR
+    # commonly returns a wrapped designation as two boxes, so join those lines.
     class_type = None
-    keywords = [
-        "vodka",
-        "whiskey",
-        "whisky",
-        "bourbon",
-        "rum",
-        "gin",
-        "wine",
-        "beer",
-        "whiskey",
-        "bourbon",
-    ]
-    for ln in lines[:4]:
-        if any(k in ln.lower() for k in keywords):
-            class_type = ln
-            break
+    alcohol_line = next(
+        (index for index, line in enumerate(lines) if re.search(r"\d(?:\.\d+)?\s*%", line)),
+        None,
+    )
+    if alcohol_line is not None and alcohol_line > 1:
+        class_type = " ".join(lines[1:alcohol_line])
+    keywords = ("vodka", "whiskey", "whisky", "bourbon", "rum", "gin", "wine", "beer")
+    if not class_type:
+        for ln in lines[1:5]:
+            if any(keyword in ln.lower() for keyword in keywords):
+                class_type = ln
+                break
     if not class_type and len(lines) > 1:
         class_type = lines[1]
 
     # Alcohol content (ABV)
     abv_match = re.search(
-        r"(\d{1,3}(?:\.\d)?\s*%\s*(?:alc\.?|alc|vol|Alc\.?|vol\.?))",
+        r"(\d{1,3}(?:\.\d+)?\s*%\s*"
+        r"(?:alc(?:ohol)?\.?\s*(?:by\s*)?vol(?:ume)?\.?|vol\.?)?"
+        r"(?:\s*\(\s*\d+(?:\.\d+)?\s*proof\s*\))?)",
         joined,
         re.IGNORECASE,
     )
     alcohol_content = abv_match.group(1) if abv_match else None
 
     # Net contents (ml, L)
-    net_match = re.search(r"(\d+\s*(?:ml|mL|l|L))", joined)
+    net_match = re.search(r"(\d+(?:\.\d+)?\s*(?:m[lL]|[lL]))\b", joined)
     net_contents = net_match.group(1) if net_match else None
 
     # Warning statement: preserve the complete warning, even when OCR wraps it.
     warning = None
-    for index, ln in enumerate(lines):
-        if "warning" in ln.lower():
-            warning = " ".join(lines[index:])
-            break
+    standard_warning = re.search(
+        r"(government\s+warning\s*:.*?health\s+problems\.)",
+        " ".join(lines),
+        flags=re.IGNORECASE,
+    )
+    if standard_warning:
+        warning = standard_warning.group(1)
+    else:
+        for index, ln in enumerate(lines):
+            if "warning" in ln.lower():
+                warning_lines = []
+                for warning_line in lines[index:]:
+                    if re.match(r"^(?:batch|lot|barcode)\b", warning_line, re.IGNORECASE):
+                        break
+                    warning_lines.append(warning_line)
+                warning = " ".join(warning_lines)
+                break
 
     return {
         "brand_name": brand,
@@ -180,31 +197,68 @@ async def _call_provider(image_bytes: bytes) -> Optional[ExtractedLabel]:
     return ExtractedLabel(**normalized)
 
 
-async def extract_label_fields(image_bytes: bytes) -> ExtractedLabel:
-    """Try provider extraction first (if key present); otherwise fall back to OCR.
+def rapidocr_available() -> bool:
+    """Return whether the self-contained local OCR dependencies can be imported."""
+    try:
+        import onnxruntime  # noqa: F401
+        import rapidocr  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
-    The OCR fallback uses `pytesseract` and simple heuristics to extract the
-    five required fields so the app can run without paid LLM access.
-    """
+
+def _get_rapidocr_engine():
+    global _rapidocr_engine
+    if _rapidocr_engine is None:
+        with _rapidocr_init_lock:
+            if _rapidocr_engine is None:
+                from rapidocr import RapidOCR
+
+                _rapidocr_engine = RapidOCR()
+    return _rapidocr_engine
+
+
+def _run_rapidocr(image_bytes: bytes) -> str:
+    """Run the shared ONNX OCR session safely outside the async event loop."""
+    engine = _get_rapidocr_engine()
+    with _rapidocr_inference_lock:
+        result = engine(image_bytes)
+    texts = tuple(result.txts or ())
+    return "\n".join(texts)
+
+
+async def extract_label_fields(image_bytes: bytes) -> ExtractedLabel:
+    """Extract fields locally, with provider and Tesseract fallbacks."""
     normalized_image = _normalize_image(image_bytes)
 
-    # 1) Try provider if configured.
+    # The bundled ONNX path is first so deployed requests do not depend on an
+    # outbound network and can stay inside the stakeholder's five-second goal.
+    if rapidocr_available():
+        try:
+            ocr_text = await asyncio.to_thread(_run_rapidocr, normalized_image)
+            if ocr_text.strip():
+                return ExtractedLabel(**_extract_from_text(ocr_text))
+        except Exception as exc:  # Keep the optional fallbacks available.
+            logger.warning("RapidOCR extraction failed: %s", type(exc).__name__)
+
+    # A configured vision provider can recover labels local OCR cannot read.
     label = await _call_provider(normalized_image)
     if label is not None:
         return label
 
-    # 2) Fallback to local OCR
+    # Retain Tesseract for development environments where it is installed.
     try:
         import pytesseract
     except ImportError as exc:
         raise ExtractionUnavailableError(
-            "Image extraction is unavailable. Configure LLM_API_KEY or install Tesseract OCR."
+            "Image extraction is unavailable. Install RapidOCR, configure LLM_API_KEY, "
+            "or install Tesseract OCR."
         ) from exc
 
     if shutil.which("tesseract") is None:
         raise ExtractionUnavailableError(
-            "Image extraction is unavailable. Configure a working LLM_API_KEY or install "
-            "the Tesseract system binary."
+            "Image extraction is unavailable. Install RapidOCR, configure a working "
+            "LLM_API_KEY, or install the Tesseract system binary."
         )
 
     img = Image.open(BytesIO(normalized_image))

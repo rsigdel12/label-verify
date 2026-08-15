@@ -3,21 +3,13 @@ import pathlib
 import shutil
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from app.extraction.vision_client import rapidocr_available
 from app.routes.batch import router as batch_router
 from app.routes.verify import router as verify_router
 
 app = FastAPI(title="Label Verify API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 @app.get("/health")
@@ -28,11 +20,13 @@ async def health_check() -> dict:
 @app.get("/ready")
 async def readiness_check() -> dict:
     provider_configured = bool(os.getenv("LLM_API_KEY"))
+    local_ocr_available = rapidocr_available()
     tesseract_available = shutil.which("tesseract") is not None
-    ready = provider_configured or tesseract_available
+    ready = local_ocr_available or provider_configured or tesseract_available
     return {
         "status": "ready" if ready else "not_ready",
         "extraction": {
+            "local_ocr_available": local_ocr_available,
             "vision_provider_configured": provider_configured,
             "tesseract_available": tesseract_available,
         },
