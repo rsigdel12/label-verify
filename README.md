@@ -9,7 +9,7 @@ Deployed application: <https://label-verify-p15v.onrender.com/>
 | Stakeholder need | Implementation |
 | --- | --- |
 | Obvious workflow for mixed technical comfort levels | One two-step screen, drag-and-drop upload, plain-language statuses, keyboard labels, responsive layout, and a one-click working sample |
-| Explicit speed/accuracy choice | **Fast** runs one bounded local OCR pass and targets under five seconds; **Accurate** uses contextual AI vision and retries one transient Gemini failure, taking up to about 40 seconds in the worst case |
+| Explicit speed/accuracy choice | **Fast** runs bounded local OCR and targets under five seconds; **Accurate** uses contextual AI vision and retries one transient Gemini failure, taking up to about 40 seconds in the worst case |
 | Scan without an application | Scan-only mode displays the five detected fields with a clear warning that transcription is not a compliance decision |
 | Easy repeat reviews | **Check new label** clears the previous image, results, and application values while restoring the editable standard warning |
 | Compare label artwork with an application | The application form is the expected record; OCR text from the image is the actual value |
@@ -37,9 +37,9 @@ The generated distilled-spirits fixtures follow the current TTB examples for the
 - `backend/tests/fixtures/` — eight generated label images with JSON application data and intended results.
 - `frontend/assets/sample-label.png` — self-contained sample used by the live demonstration.
 
-Each request selects its extractor explicitly. **Fast** is the default and keeps the image on the application server for one local OCR pass. **Accurate** sends a 1600-pixel JPEG to a configured vision provider with a strict five-field JSON schema. The recommended prototype provider is `gemini-3.5-flash`, which accepts image input and is available through Gemini's limited free API tier. Existing OpenAI deployments remain supported with `gpt-5.4-mini` through the Responses API. The prompt requires visible transcription rather than filling likely warning text from memory. Gemini gets two 20-second attempts with a short backoff for transient timeouts, HTTP 429 throttling, and server errors. Accurate batches are capped at two concurrent provider calls to reduce free-tier throttling. Successful requests still return immediately, and provider failure does not silently substitute less-accurate OCR.
+Each request selects its extractor explicitly. **Fast** is the default and keeps the image on the application server. It runs one full-label OCR pass and adds at most two focused detail passes only when required fields are incomplete. **Accurate** sends a 1600-pixel JPEG to a configured vision provider with a strict five-field JSON schema. The recommended prototype provider is `gemini-3.5-flash`, which accepts image input and is available through Gemini's limited free API tier. Existing OpenAI deployments remain supported with `gpt-5.4-mini` through the Responses API. The prompt requires visible transcription rather than filling likely warning text from memory. Gemini gets two 20-second attempts with a short backoff for transient timeouts, HTTP 429 throttling, and server errors. Accurate batches are capped at two concurrent provider calls to reduce free-tier throttling. Successful requests still return immediately, and provider failure does not silently substitute less-accurate OCR.
 
-Fast mode uses RapidOCR locally. Images are limited to 20 megapixels and corrected using phone-camera EXIF orientation. A confidence-gated OpenCV pass detects a single likely label, corrects perspective, applies local CLAHE contrast and mild sharpening, and resizes to a 960-pixel bound. Ambiguous multi-panel artwork keeps the complete image so preprocessing cannot discard fields. The PP-OCRv6 tiny detector uses a 512-pixel bound and slightly more recall for small warning and measurement text. Its shared ONNX sessions are preloaded at application startup so model initialization is not charged to the first Fast request. The internal `auto` compatibility mode can add a targeted retry, but it is intentionally not shown in the UI because its latency is less predictable. A system Tesseract installation remains a final development fallback.
+Fast mode uses RapidOCR locally. Images are limited to 20 megapixels and corrected using phone-camera EXIF orientation. A confidence-gated OpenCV pass can find labels occupying as little as 5% of a phone photo, corrects perspective from the original-resolution pixels, applies local CLAHE contrast and mild sharpening, and resizes to a 1400-pixel bound. Ambiguous multi-panel artwork keeps the complete image so preprocessing cannot discard fields. The PP-OCRv6 tiny detector uses a 1280-pixel bound and lower confidence thresholds to retain small warning and measurement text. Incomplete results receive only the necessary overlapping upper or lower high-resolution grayscale pass, with a time cutoff that protects the five-second target. Candidate warnings are ranked against the required federal wording, but returned values always remain OCR transcriptions rather than substituted boilerplate. Shared ONNX sessions are preloaded at application startup so model initialization is not charged to the first Fast request. A system Tesseract installation remains a final development fallback.
 
 RapidOCR and the bundled PP-OCRv6 model assets are used under the Apache-2.0 license.
 
@@ -83,7 +83,7 @@ cd label-verify\backend
 python -m pytest -q
 ```
 
-The suite contains 58 tests, including per-request mode selection, transient Gemini retry, Gemini and OpenAI request schemas, scan-only extraction, provider readiness/failure behavior, and real local OCR through single and batch multipart endpoints. It also covers startup loading, enum classification, alternate ABV and net-content formats, common numeric OCR mistakes, warning uncertainty, validation and error responses, fixture integrity, timing fields, reset behavior, and the frontend/API contract.
+The suite contains 62 tests, including per-request mode selection, transient Gemini retry, Gemini and OpenAI request schemas, scan-only extraction, provider readiness/failure behavior, and real local OCR through single and batch multipart endpoints. It also covers startup loading, regional OCR retry behavior, a small-label phone-photo stress case, enum classification, split and alternate ABV/net-content formats, common numeric OCR mistakes, warning uncertainty and candidate ranking, validation and error responses, fixture integrity, timing fields, reset behavior, and the frontend/API contract.
 
 Run the complete real-OCR fixture evaluation:
 
@@ -91,7 +91,7 @@ Run the complete real-OCR fixture evaluation:
 python tests\run_ocr_extraction.py
 ```
 
-Fast mode completes all eight fixtures in under two seconds each on the reference development machine and matches every intended outcome, including the 7-degree skew and glare cases. The set also includes a clean match, brand-case variation, case-insensitive warning match, ABV mismatch, class/type typo requiring review, and net-contents mismatch.
+Fast mode completes all eight fixtures in about one second or less each on the reference development machine and matches every intended outcome, including the 7-degree skew and glare cases. A synthetic 2400-by-3200 phone photo with the label occupying roughly 7.5% of the frame also extracts all five fields in about one second. The set additionally includes a clean match, brand-case variation, case-insensitive warning match, ABV mismatch, class/type typo requiring review, and net-contents mismatch.
 
 ## API
 

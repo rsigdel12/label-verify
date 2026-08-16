@@ -1,9 +1,12 @@
 import asyncio
 import json
+import time
+from io import BytesIO
 from pathlib import Path
 
 import httpx
 import pytest
+from PIL import Image
 
 from app.extraction import vision_client
 
@@ -104,6 +107,65 @@ def test_ocr_parser_corrects_numeric_letter_confusions_in_measurements():
     assert parsed["net_contents"] == "750 mL"
 
 
+def test_ocr_parser_joins_measurements_split_across_three_boxes():
+    parsed = vision_client._extract_from_text(
+        "Example Brand\nVODKA\nALCOHOL\n4O%\nBY VOLUME\nNET CONTENTS\n75O\nmL"
+    )
+
+    assert parsed["alcohol_content"] == "40% BY VOLUME"
+    assert parsed["net_contents"] == "750 mL"
+
+
+def test_merge_prefers_more_accurate_warning_not_merely_longer_warning():
+    noisy = (
+        "GOVERNMENT WARNING: (1) Acording to the Surgeon General, women should "
+        "not drink bith defects. (2) Corsumption ef alchall beverages impairs "
+        "alcohic beverages during pregnancy becuse of the riak ef your ability "
+        "to drive a car or operate machinery, and may cause health problems. "
+        "EXTRA ARTWORK TEXT"
+    )
+    clean = vision_client.STANDARD_WARNING_TEXT
+
+    merged = vision_client._merge_extractions(
+        {"warning_statement": noisy}, {"warning_statement": clean}
+    )
+
+    assert len(noisy) > len(clean)
+    assert merged["warning_statement"] == clean
+
+
+def test_local_mode_retries_a_missing_detail_region(monkeypatch):
+    incomplete = {
+        "brand_name": "Acme Spirits",
+        "class_type": "VODKA",
+        "alcohol_content": "40% Alc. by Vol.",
+        "net_contents": None,
+        "warning_statement": None,
+    }
+    complete_lower = {
+        **incomplete,
+        "net_contents": "750 mL",
+        "warning_statement": vision_client.STANDARD_WARNING_TEXT,
+    }
+    calls = []
+
+    monkeypatch.setattr(vision_client, "_prepare_ocr_image", lambda image: image)
+    monkeypatch.setattr(
+        vision_client,
+        "_prepare_ocr_retry_image",
+        lambda image, region: calls.append(region) or image,
+    )
+    monkeypatch.setattr(vision_client, "rapidocr_available", lambda: True)
+    results = iter((incomplete, complete_lower))
+    monkeypatch.setattr(vision_client, "_run_rapidocr", lambda _image: next(results))
+
+    extracted = asyncio.run(vision_client.extract_label_fields(b"image", "local"))
+
+    assert calls == ["lower"]
+    assert extracted.net_contents == "750 mL"
+    assert extracted.warning_statement == vision_client.STANDARD_WARNING_TEXT
+
+
 def test_bundled_local_ocr_reads_clean_fixture(monkeypatch):
     fixture = Path(__file__).parent / "fixtures" / "fixture_01_clean_match.png"
     monkeypatch.delenv("LLM_API_KEY", raising=False)
@@ -115,6 +177,29 @@ def test_bundled_local_ocr_reads_clean_fixture(monkeypatch):
     assert extracted.alcohol_content == "45% Alc. by Vol."
     assert extracted.net_contents == "750 mL"
     assert extracted.warning_statement.endswith("may cause health problems.")
+
+
+def test_local_ocr_reads_small_label_in_phone_photo_under_five_seconds():
+    fixture = Path(__file__).parent / "fixtures" / "fixture_01_clean_match.png"
+    with Image.open(fixture) as source:
+        label = source.convert("RGB").resize((660, 880), Image.Resampling.LANCZOS)
+    photo = Image.new("RGB", (2400, 3200), (42, 48, 55))
+    photo.paste(label, (870, 1050))
+    encoded = BytesIO()
+    photo.save(encoded, format="JPEG", quality=72)
+
+    started = time.perf_counter()
+    extracted = asyncio.run(
+        vision_client.extract_label_fields(encoded.getvalue(), "local")
+    )
+    elapsed = time.perf_counter() - started
+
+    assert extracted.brand_name == "Acme Spirits"
+    assert extracted.class_type == "KENTUCKY STRAIGHT BOURBON WHISKEY"
+    assert extracted.alcohol_content == "45% Alc. by Vol."
+    assert extracted.net_contents == "750 mL"
+    assert extracted.warning_statement == vision_client.STANDARD_WARNING_TEXT
+    assert elapsed < 5
 
 
 def test_complete_vision_result_skips_local_ocr(monkeypatch):

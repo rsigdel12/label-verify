@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import threading
+import time
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -20,9 +21,10 @@ from app.extraction.schema import ExtractedLabel
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_PIXELS = 20_000_000
-OCR_IMAGE_MAX_SIDE = 960
-OCR_DETECTION_MAX_SIDE = 512
-OCR_PREPROCESS_MAX_SIDE = 1400
+OCR_IMAGE_MAX_SIDE = 1400
+OCR_DETECTION_MAX_SIDE = 1280
+OCR_PREPROCESS_MAX_SIDE = 1600
+LOCAL_OCR_RETRY_CUTOFF_SECONDS = 2.25
 VISION_IMAGE_MAX_SIDE = 1600
 AUTO_PROVIDER_TIMEOUT_SECONDS = 3.5
 ACCURATE_TIMEOUT_SECONDS = 20.0
@@ -168,7 +170,10 @@ def _find_label_quad(image):
     for contour in contours:
         area = float(cv2.contourArea(contour))
         area_ratio = area / image_area
-        if area_ratio < 0.12 or area_ratio > 0.98:
+        # A phone photo often leaves the label at only 5-10% of the frame.
+        # Shape and rectangularity checks below keep this lower area threshold
+        # from accepting arbitrary small contours.
+        if area_ratio < 0.05 or area_ratio > 0.98:
             continue
         perimeter = cv2.arcLength(contour, True)
         approximation = cv2.approxPolyDP(contour, 0.025 * perimeter, True)
@@ -195,7 +200,7 @@ def _find_label_quad(image):
         return None
     candidates.sort(key=lambda candidate: candidate[0], reverse=True)
     best_score, best_area, best_quad = candidates[0]
-    if best_score < 0.1:
+    if best_score < 0.04:
         return None
     # Multiple substantial panels usually mean complete flat artwork. Cropping
     # to only one would discard fields, so retain the full upload.
@@ -241,7 +246,7 @@ def _warp_quad(image, quad):
 
 
 def _prepare_ocr_image(image_bytes: bytes) -> bytes:
-    """Crop, deskew, and improve local contrast before the single OCR pass."""
+    """Crop and deskew a label while retaining detail from the original image."""
     try:
         import cv2
         import numpy as np
@@ -249,10 +254,28 @@ def _prepare_ocr_image(image_bytes: bytes) -> bytes:
         return _enhance_image(_normalize_image(image_bytes))
 
     image = _load_rgb_image(image_bytes)
-    image.thumbnail((OCR_PREPROCESS_MAX_SIDE, OCR_PREPROCESS_MAX_SIDE))
     rgb = np.asarray(image)
-    quad = _find_label_quad(rgb)
+
+    # Boundary detection is cheaper on a bounded copy, but perspective
+    # correction must use the original pixels. Warping the detection-sized
+    # preview made small labels in phone photos permanently blurry before OCR.
+    detection_rgb = rgb
+    detection_scale = min(
+        1.0, OCR_PREPROCESS_MAX_SIDE / max(image.width, image.height)
+    )
+    if detection_scale < 1.0:
+        detection_rgb = cv2.resize(
+            rgb,
+            (
+                max(1, round(image.width * detection_scale)),
+                max(1, round(image.height * detection_scale)),
+            ),
+            interpolation=cv2.INTER_AREA,
+        )
+    quad = _find_label_quad(detection_rgb)
     if quad is not None:
+        if detection_scale < 1.0:
+            quad = quad / detection_scale
         rgb = _warp_quad(rgb, quad)
 
     height, width = rgb.shape[:2]
@@ -279,6 +302,32 @@ def _prepare_ocr_image(image_bytes: bytes) -> bytes:
         [int(cv2.IMWRITE_JPEG_QUALITY), 92],
     )
     return encoded.tobytes() if success else _normalize_image(image_bytes)
+
+
+def _prepare_ocr_retry_image(image_bytes: bytes, region: str) -> bytes:
+    """Create a higher-resolution grayscale view of a missing label region."""
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return _enhance_image(_normalize_image(image_bytes), region)
+
+    image = _load_rgb_image(image_bytes)
+    width, height = image.size
+    if region == "upper":
+        image = image.crop((0, 0, width, max(1, round(height * 0.7))))
+    elif region == "lower":
+        image = image.crop((0, round(height * 0.3), width, height))
+
+    image.thumbnail((OCR_IMAGE_MAX_SIDE, OCR_IMAGE_MAX_SIDE))
+    gray = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2GRAY)
+    gray = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(gray)
+    blurred = cv2.GaussianBlur(gray, (0, 0), 0.75)
+    gray = cv2.addWeighted(gray, 1.18, blurred, -0.18, 0)
+    success, encoded = cv2.imencode(".png", gray)
+    if success:
+        return encoded.tobytes()
+    return _enhance_image(_normalize_image(image_bytes), region)
 
 
 def _enhance_image(image_bytes: bytes, region: str = "full") -> bytes:
@@ -365,7 +414,7 @@ def _is_utility_line(line: str) -> bool:
 
 
 ALCOHOL_HINT = re.compile(
-    r"(?:alc(?:ohol)?|alc[o0]h[o0]l|abv|by\s+vol(?:ume)?|vol\.?|proof)",
+    r"(?:a[l1i]c(?:[o0]h[o0]l)?|abv|by\s+vo[l1](?:ume)?|vo[l1]\.?|proof)",
     re.IGNORECASE,
 )
 PERCENT_VALUE = re.compile(
@@ -379,12 +428,31 @@ NET_CONTENTS_VALUE = re.compile(
     r"l|lit(?:er|re)s?|fl\.?\s*oz\.?|fluid\s+ounces?|oz\.?)\b",
     re.IGNORECASE,
 )
+STANDARD_WARNING_TEXT = (
+    "GOVERNMENT WARNING: (1) According to the Surgeon General, women should not "
+    "drink alcoholic beverages during pregnancy because of the risk of birth "
+    "defects. (2) Consumption of alcoholic beverages impairs your ability to "
+    "drive a car or operate machinery, and may cause health problems."
+)
 
 
 def _normalize_numeric_ocr(line: str) -> str:
     """Correct high-confidence letter/number confusions inside measurements."""
-    normalized = re.sub(r"(?<=\d)[oO](?=\d|[.,%\s]|$)", "0", line)
-    return re.sub(r"(?<=\d)[iI](?=\d|[.,%\s]|$)", "1", normalized)
+    substitutions = str.maketrans(
+        {"O": "0", "o": "0", "I": "1", "i": "1", "S": "5", "s": "5", "B": "8"}
+    )
+
+    def normalize_token(match: re.Match) -> str:
+        token = match.group(0)
+        # Only touch OCR-looking numeric tokens containing a real digit. This
+        # fixes 75O, 4O, and I2 without changing words or measurement units.
+        return token.translate(substitutions) if re.search(r"\d", token) else token
+
+    return re.sub(
+        r"(?<![A-Za-z])[0-9OoIiSsB]+(?:[.,][0-9OoIiSsB]+)?",
+        normalize_token,
+        line,
+    )
 
 
 def _looks_like_alcohol_line(line: str) -> bool:
@@ -395,25 +463,51 @@ def _looks_like_alcohol_line(line: str) -> bool:
 
 
 def _extract_alcohol_content(lines: list[str]) -> tuple[str | None, int | None]:
-    for index, line in enumerate(lines):
-        normalized_line = _normalize_numeric_ocr(line)
-        if _looks_like_alcohol_line(normalized_line):
-            return normalized_line, index
+    # Small print is often split into several adjacent OCR boxes. Check short
+    # windows so "ALCOHOL / 40% / BY VOLUME" and "80 / PROOF" still parse.
+    candidates = []
+    for window_size in (1, 2, 3):
+        for index in range(len(lines) - window_size + 1):
+            combined = _normalize_numeric_ocr(
+                " ".join(lines[index : index + window_size])
+            )
+            if _looks_like_alcohol_line(combined):
+                candidates.append((combined, index))
+    if candidates:
 
-    # OCR sometimes splits "ALCOHOL" and "40% BY VOLUME" into adjacent boxes.
-    for index in range(len(lines) - 1):
-        combined = _normalize_numeric_ocr(f"{lines[index]} {lines[index + 1]}")
-        if _looks_like_alcohol_line(combined):
-            return combined, index
+        def candidate_score(item: tuple[str, int]) -> tuple:
+            value = item[0]
+            has_volume = bool(
+                re.search(r"\bby\s+vo[l1](?:ume)?\b", value, re.IGNORECASE)
+            )
+            has_proof = bool(PROOF_VALUE.search(value))
+            return (
+                has_volume,
+                has_proof,
+                -len(value) if has_volume or has_proof else 0,
+                bool(
+                    re.search(
+                        r"\ba[l1i]c(?:ohol)?\b|\babv\b", value, re.IGNORECASE
+                    )
+                ),
+                -len(value),
+            )
+
+        return max(candidates, key=candidate_score)
     return None, None
 
 
 def _extract_net_contents(lines: list[str]) -> str | None:
-    candidates = [
-        _normalize_numeric_ocr(line)
-        for line in lines
-        if NET_CONTENTS_VALUE.search(_normalize_numeric_ocr(line))
-    ]
+    candidates = []
+    for index, line in enumerate(lines):
+        for candidate in (
+            line,
+            " ".join(lines[index : index + 2]),
+            " ".join(lines[index : index + 3]),
+        ):
+            normalized = _normalize_numeric_ocr(candidate)
+            if NET_CONTENTS_VALUE.search(normalized):
+                candidates.append(normalized)
     if not candidates:
         return None
     # Prefer an explicitly labeled declaration over an isolated measurement.
@@ -432,6 +526,23 @@ def _warning_heading_score(line: str) -> float:
     normalized = " ".join(re.findall(r"[a-z0-9]+", line.casefold()))
     normalized = normalized.replace("0", "o").replace("1", "i")
     return float(fuzz.partial_ratio("government warning", normalized))
+
+
+def _warning_transcription_score(value: str | None) -> float:
+    """Score OCR completeness against the federally required warning wording."""
+    if not value:
+        return 0.0
+    normalized = " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+    expected = " ".join(re.findall(r"[a-z0-9]+", STANDARD_WARNING_TEXT.casefold()))
+    return float(fuzz.ratio(expected, normalized))
+
+
+def _warning_is_complete(value: str | None) -> bool:
+    return bool(
+        value
+        and _warning_heading_score(value) >= 82
+        and _warning_transcription_score(value) >= 90
+    )
 
 
 def _extract_warning(lines: list[str]) -> str | None:
@@ -517,15 +628,18 @@ def _extract_from_text(text: str, line_heights: list[float] | None = None) -> di
             and not re.match(r"^\(?\d\)?[.)]?\s", line)
         ]
         if candidates:
-            # Prefer the largest detected text, with a small top-of-label tie
-            # breaker. Perspective can make the line below a brand appear a
-            # few pixels taller, so choose the earliest candidate within 15%
-            # of the maximum instead of requiring the absolute maximum.
+            # Visual prominence is the strongest brand signal. Penalize a
+            # recognized regulated designation so a large "VODKA" line does
+            # not displace a slightly smaller brand directly above it.
             maximum_height = max(line_heights[index] for index in candidates)
-            brand_index = next(
-                index
-                for index in candidates
-                if line_heights[index] >= maximum_height * 0.85
+            brand_index = max(
+                candidates,
+                key=lambda index: (
+                    line_heights[index] / max(1.0, maximum_height)
+                    - (0.4 if classify_alcohol_type(lines[index])[0] else 0.0)
+                    - min(index, 12) * 0.025
+                    - (0.15 if len(lines[index].split()) > 6 else 0.0)
+                ),
             )
     brand = lines[brand_index] if brand_index is not None else None
 
@@ -791,17 +905,19 @@ def _get_rapidocr_engine():
                     params={
                         "Global.max_side_len": OCR_IMAGE_MAX_SIDE,
                         "Global.use_cls": False,
-                        "Global.text_score": 0.45,
+                        "Global.text_score": 0.4,
                         "Global.log_level": "warning",
                         "Det.limit_side_len": OCR_DETECTION_MAX_SIDE,
                         "Det.limit_type": "max",
-                        "Det.box_thresh": 0.45,
-                        "Det.max_candidates": 600,
+                        "Det.thresh": 0.25,
+                        "Det.box_thresh": 0.4,
+                        "Det.max_candidates": 1000,
+                        "Det.unclip_ratio": 1.7,
                         "Det.model_path": str(LOCAL_DETECTION_MODEL),
                         "Rec.model_path": str(LOCAL_RECOGNITION_MODEL),
                         # ONNX Runtime otherwise creates a thread per detected
                         # CPU, increasing memory sharply on constrained hosts.
-                        "EngineConfig.onnxruntime.intra_op_num_threads": 1,
+                        "EngineConfig.onnxruntime.intra_op_num_threads": 2,
                         "EngineConfig.onnxruntime.inter_op_num_threads": 1,
                     }
                 )
@@ -836,28 +952,29 @@ def _extraction_quality(fields: dict) -> int:
     score += int(classify_alcohol_type(fields.get("class_type"))[0] is not None)
     score += int(bool(fields.get("alcohol_content")))
     score += int(bool(fields.get("net_contents")))
-    warning = fields.get("warning_statement") or ""
-    if len(warning) >= 180 and "health problems" in warning.lower():
+    if _warning_is_complete(fields.get("warning_statement")):
         score += 3
     return score
 
 
-def _retry_region(fields: dict) -> str:
-    warning = fields.get("warning_statement") or ""
+def _retry_regions(fields: dict) -> tuple[str, ...]:
+    """Choose no more than two detail views for fields missing from a pass."""
     missing_upper = (
-        classify_alcohol_type(fields.get("class_type"))[0] is None
+        not fields.get("brand_name")
+        or classify_alcohol_type(fields.get("class_type"))[0] is None
         or not fields.get("alcohol_content")
     )
     missing_lower = (
         not fields.get("net_contents")
-        or len(warning) < 180
-        or "health problems" not in warning.lower()
+        or not _warning_is_complete(fields.get("warning_statement"))
     )
-    if missing_upper and not missing_lower:
-        return "upper"
-    if missing_lower and not missing_upper:
-        return "lower"
-    return "full"
+    if missing_upper and missing_lower:
+        return ("upper", "lower")
+    if missing_upper:
+        return ("upper",)
+    if missing_lower:
+        return ("lower",)
+    return ()
 
 
 def _merge_extractions(primary: dict, secondary: dict) -> dict:
@@ -865,8 +982,14 @@ def _merge_extractions(primary: dict, secondary: dict) -> dict:
     for field, value in secondary.items():
         if not merged.get(field) and value:
             merged[field] = value
-    if len(secondary.get("warning_statement") or "") > len(
-        merged.get("warning_statement") or ""
+    primary_warning = merged.get("warning_statement")
+    secondary_warning = secondary.get("warning_statement")
+    if (
+        _warning_transcription_score(secondary_warning),
+        len(secondary_warning or ""),
+    ) > (
+        _warning_transcription_score(primary_warning),
+        len(primary_warning or ""),
     ):
         merged["warning_statement"] = secondary["warning_statement"]
     primary_type, _ = classify_alcohol_type(merged.get("class_type"))
@@ -888,7 +1011,8 @@ async def extract_label_fields(
 ) -> ExtractedLabel:
     """Extract using the requested fast, accurate, or compatibility mode.
 
-    ``local`` is the user-facing Fast mode and performs one preprocessed OCR pass.
+    ``local`` is the user-facing Fast mode and adds bounded detail passes only
+    when the first OCR result is incomplete.
     ``vision`` is the user-facing Accurate mode and never adds local OCR latency.
     ``auto`` remains available for API compatibility and may combine both.
     """
@@ -929,6 +1053,7 @@ async def extract_label_fields(
 
     # Keep the provider path unchanged. Only local OCR receives the
     # confidence-gated crop, perspective correction, and contrast enhancement.
+    local_started = time.perf_counter()
     normalized_image = await asyncio.to_thread(_prepare_ocr_image, image_bytes)
     local_fields = None
     if rapidocr_available():
@@ -938,21 +1063,23 @@ async def extract_label_fields(
                 merged_fields = _merge_extractions(provider_fields, local_fields)
                 if any(merged_fields.values()):
                     return ExtractedLabel(**merged_fields)
-            if _extraction_quality(local_fields) >= 7:
-                return ExtractedLabel(**local_fields)
-
-            if mode == "auto":
-                # Compatibility mode can trade additional latency for a
-                # contrast-enhanced local retry after an incomplete result.
-                # difficult lighting. Crop toward the missing fields so small
-                # text gains resolution without increasing peak tensor size.
-                enhanced_image = await asyncio.to_thread(
-                    _enhance_image, normalized_image, _retry_region(local_fields)
+            retry_regions = _retry_regions(local_fields)
+            for region in retry_regions:
+                # Regional views retain more source pixels for small type. A
+                # strict cutoff prevents retries from pushing a slow machine
+                # beyond the Fast-mode response target.
+                if (
+                    time.perf_counter() - local_started
+                    >= LOCAL_OCR_RETRY_CUTOFF_SECONDS
+                ):
+                    break
+                retry_image = await asyncio.to_thread(
+                    _prepare_ocr_retry_image, image_bytes, region
                 )
-                enhanced_fields = await asyncio.to_thread(
-                    _run_rapidocr, enhanced_image
-                )
-                local_fields = _merge_extractions(local_fields, enhanced_fields)
+                retry_fields = await asyncio.to_thread(_run_rapidocr, retry_image)
+                local_fields = _merge_extractions(local_fields, retry_fields)
+                if _extraction_quality(local_fields) >= 7:
+                    break
             if local_fields and any(local_fields.values()):
                 return ExtractedLabel(**local_fields)
         except Exception as exc:  # Keep the optional fallbacks available.
