@@ -8,10 +8,10 @@ const byId = (id) => document.getElementById(id);
 const form=byId("verifyForm"), fileInput=byId("fileInput"), uploadArea=byId("uploadArea"), filePreview=byId("filePreview"), previewImage=byId("previewImage"), fileName=byId("fileName"), fileSize=byId("fileSize"), extractionMode=byId("extractionMode"), modeHelp=byId("modeHelp"), applicationSection=byId("applicationSection"), compareWorkflowButton=byId("compareWorkflowButton"), scanWorkflowButton=byId("scanWorkflowButton"), workflowHelp=byId("workflowHelp"), actionHelp=byId("actionHelp"), submitButton=byId("submitButton"), buttonLabel=submitButton.querySelector(".button-label"), serviceStatus=byId("serviceStatus"), loading=byId("loading"), loadingHeading=byId("loadingHeading"), loadingElapsed=byId("loadingElapsed"), loadingMessage=byId("loadingMessage"), errorBanner=byId("errorBanner"), errorMessage=byId("errorMessage"), noticeBanner=byId("noticeBanner"), noticeMessage=byId("noticeMessage"), resultsSection=byId("resultsSection"), resultSummary=byId("resultSummary"), summaryLabel=byId("summaryLabel"), resultsHeading=byId("resultsHeading"), resultCounts=byId("resultCounts"), summaryIcon=byId("summaryIcon"), scanAdvisory=byId("scanAdvisory"), scanAdvisoryText=byId("scanAdvisoryText"), fieldResultsHeading=byId("fieldResultsHeading"), fieldResultsHelp=byId("fieldResultsHelp"), serverTime=byId("serverTime"), roundTripTime=byId("roundTripTime"), resultFields=byId("resultFields");
 let selectedFiles=[], previewUrl=null, timerId=null, serviceReady=false, localAvailable=true, visionAvailable=false, visionProvider=null, workflowMode="compare";
 
-// Most applications use the federally prescribed warning. Prefill it to save
-// reviewers from retyping a long exact-value field while leaving it editable
-// for the approved record in front of them.
-byId("warningStatement").value = STANDARD_WARNING;
+// The HTML contains the same default so it is visible before JavaScript loads.
+// Keep this fallback for older cached markup and leave the field editable.
+const warningStatement = byId("warningStatement");
+if (!warningStatement.value.trim()) warningStatement.value = STANDARD_WARNING;
 
 function formatDuration(ms){if(!Number.isFinite(ms))return "Not available";return ms<1000?`${Math.round(ms)} ms`:`${(ms/1000).toFixed(2)} seconds`}
 function formatFileSize(bytes){return bytes<1048576?`${Math.max(1,Math.round(bytes/1024))} KB`:`${(bytes/1048576).toFixed(1)} MB`}
@@ -62,7 +62,27 @@ function renderResults(results,processingTimeMs,totalRequestMs){
   resultSummary.className=`result-summary ${overall}`;summaryLabel.textContent="Verification result";resultsHeading.textContent=heading;summaryIcon.textContent=icon;resultCounts.textContent=`${counts.pass} passed · ${counts.fail} failed · ${counts.needs_review} need review${errors.length?` · ${errors.length} file errors`:""}`;scanAdvisory.classList.add("hidden");fieldResultsHeading.textContent="Field comparison";fieldResultsHelp.textContent="Application values are expected; label text is detected.";serverTime.textContent=formatDuration(processingTimeMs);serverTime.classList.toggle("over-target",extractionMode.value==="local"&&processingTimeMs>5000&&results.length===1);roundTripTime.textContent=formatDuration(totalRequestMs);resultsSection.classList.remove("hidden");resultsSection.focus({preventScroll:true});resultsSection.scrollIntoView({behavior:"smooth",block:"start"})
 }
 function createScanRows(extracted){const fragment=document.createDocumentFragment();for(const field of Object.keys(FIELD_LABELS)){const row=document.createElement("article"),name=document.createElement("div"),values=document.createElement("dl");row.className="field-result scan-result";name.className="field-name";name.textContent=FIELD_LABELS[field];values.className="field-values";values.append(createValueBlock("Detected from label",extracted?.[field]));row.append(name,values);fragment.append(row)}return fragment}
-function renderScanResult(data,totalRequestMs){const extracted=data?.extracted||{},found=Object.values(extracted).filter(Boolean).length;resultFields.replaceChildren(createScanRows(extracted));resultSummary.className="result-summary scan";summaryLabel.textContent="Scan result";resultsHeading.textContent="Label scan complete";summaryIcon.textContent="✓";resultCounts.textContent=`${found} of ${Object.keys(FIELD_LABELS).length} fields detected · review the transcription below`;scanAdvisoryText.textContent=data?.advisory||"AI and OCR can misread label text. Confirm these values against the uploaded image.";scanAdvisory.classList.remove("hidden");fieldResultsHeading.textContent="Detected label fields";fieldResultsHelp.textContent="These values were transcribed from the image and were not compared with an application.";serverTime.textContent=formatDuration(data?.processing_time_ms);serverTime.classList.toggle("over-target",extractionMode.value==="local"&&data?.processing_time_ms>5000);roundTripTime.textContent=formatDuration(totalRequestMs);resultsSection.classList.remove("hidden");resultsSection.focus({preventScroll:true});resultsSection.scrollIntoView({behavior:"smooth",block:"start")}
+function renderScanResult(data,totalRequestMs){
+  const extracted=data?.extracted||{};
+  const found=Object.values(extracted).filter(Boolean).length;
+  const processingTimeMs=data?.processing_time_ms;
+  resultFields.replaceChildren(createScanRows(extracted));
+  resultSummary.className="result-summary scan";
+  summaryLabel.textContent="Scan result";
+  resultsHeading.textContent="Label scan complete";
+  summaryIcon.textContent="✓";
+  resultCounts.textContent=`${found} of ${Object.keys(FIELD_LABELS).length} fields detected · review the transcription below`;
+  scanAdvisoryText.textContent=data?.advisory||"AI and OCR can misread label text. Confirm these values against the uploaded image.";
+  scanAdvisory.classList.remove("hidden");
+  fieldResultsHeading.textContent="Detected label fields";
+  fieldResultsHelp.textContent="These values were transcribed from the image and were not compared with an application.";
+  serverTime.textContent=formatDuration(processingTimeMs);
+  serverTime.classList.toggle("over-target",extractionMode.value==="local"&&processingTimeMs>5000);
+  roundTripTime.textContent=formatDuration(totalRequestMs);
+  resultsSection.classList.remove("hidden");
+  resultsSection.focus({preventScroll:true});
+  resultsSection.scrollIntoView({behavior:"smooth",block:"start"});
+}
 async function responseError(response){let message=`The server returned HTTP ${response.status}.`;if(response.headers.get("content-type")?.includes("application/json"))try{const payload=await response.json();if(typeof payload.detail==="string")message=payload.detail}catch{}return message}
 
 fileInput.addEventListener("change",()=>selectFiles(fileInput.files));extractionMode.addEventListener("change",updateModeHelp);compareWorkflowButton.addEventListener("click",()=>setWorkflow("compare"));scanWorkflowButton.addEventListener("click",()=>setWorkflow("scan"));byId("removeFileButton").addEventListener("click",()=>{clearSelectedFiles();fileInput.focus()});byId("sampleButton").addEventListener("click",loadWorkingSample);

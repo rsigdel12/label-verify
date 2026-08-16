@@ -75,8 +75,9 @@ def test_standard_government_warning_is_prefilled_but_editable():
     script = (FRONTEND / "upload.js").read_text(encoding="utf-8")
 
     assert '<textarea id="warningStatement"' in markup
+    assert "GOVERNMENT WARNING: (1) According to the Surgeon General" in markup
     assert "readonly" not in markup
-    assert 'byId("warningStatement").value = STANDARD_WARNING;' in script
+    assert 'if (!warningStatement.value.trim()) warningStatement.value = STANDARD_WARNING;' in script
     assert "According to the Surgeon General" in script
 
 
