@@ -41,6 +41,27 @@ BATCH 26-0815
     assert parsed["warning_statement"] == "GOVERNMENT WARNING: Exact warning."
 
 
+def test_ocr_parser_uses_visual_hierarchy_and_keeps_ocr_typo_in_class():
+    text = """SMALL RELEASE
+Acme Spirits
+KENTUCKY STRAIGHT BOURBAN
+WHISKEY
+ALC. 45% BY VOL.
+750 ML
+GOVERNMENT WARNING: Exact warning.
+"""
+
+    parsed = vision_client._extract_from_text(
+        text,
+        line_heights=[14, 42, 25, 25, 18, 18, 14],
+    )
+
+    assert parsed["brand_name"] == "Acme Spirits"
+    assert parsed["class_type"] == "KENTUCKY STRAIGHT BOURBAN WHISKEY"
+    assert parsed["alcohol_content"] == "ALC. 45% BY VOL."
+    assert parsed["net_contents"] == "750 ML"
+
+
 def test_bundled_local_ocr_reads_clean_fixture(monkeypatch):
     fixture = Path(__file__).parent / "fixtures" / "fixture_01_clean_match.png"
     monkeypatch.delenv("LLM_API_KEY", raising=False)

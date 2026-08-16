@@ -8,6 +8,11 @@ const byId = (id) => document.getElementById(id);
 const form=byId("verifyForm"), fileInput=byId("fileInput"), uploadArea=byId("uploadArea"), filePreview=byId("filePreview"), previewImage=byId("previewImage"), fileName=byId("fileName"), fileSize=byId("fileSize"), submitButton=byId("submitButton"), buttonLabel=submitButton.querySelector(".button-label"), serviceStatus=byId("serviceStatus"), loading=byId("loading"), loadingElapsed=byId("loadingElapsed"), loadingMessage=byId("loadingMessage"), errorBanner=byId("errorBanner"), errorMessage=byId("errorMessage"), noticeBanner=byId("noticeBanner"), noticeMessage=byId("noticeMessage"), resultsSection=byId("resultsSection"), resultSummary=byId("resultSummary"), resultsHeading=byId("resultsHeading"), resultCounts=byId("resultCounts"), summaryIcon=byId("summaryIcon"), serverTime=byId("serverTime"), roundTripTime=byId("roundTripTime"), resultFields=byId("resultFields");
 let selectedFiles=[], previewUrl=null, timerId=null, serviceReady=false;
 
+// Most applications use the federally prescribed warning. Prefill it to save
+// reviewers from retyping a long exact-value field while leaving it editable
+// for the approved record in front of them.
+byId("warningStatement").value = STANDARD_WARNING;
+
 function formatDuration(ms){if(!Number.isFinite(ms))return "Not available";return ms<1000?`${Math.round(ms)} ms`:`${(ms/1000).toFixed(2)} seconds`}
 function formatFileSize(bytes){return bytes<1048576?`${Math.max(1,Math.round(bytes/1024))} KB`:`${(bytes/1048576).toFixed(1)} MB`}
 function setNotice(message){noticeMessage.textContent=message;noticeBanner.classList.toggle("hidden",!message)}

@@ -21,7 +21,7 @@
 
     <main id="mainContent" class="page-shell">
       <section class="intro" aria-labelledby="pageTitle">
-        <div><p class="eyebrow">AI-assisted compliance review</p><h1 id="pageTitle">Compare a label with its application</h1><p>Upload the label artwork and enter the approved application values. You will get a clear field-by-field result in about five seconds.</p></div>
+        <div><p class="eyebrow">AI-assisted compliance review</p><h1 id="pageTitle">Compare a label with its application</h1><p>Label Verify reads an alcohol label image and compares five required fields with the approved application. Upload a clear, close-up image, enter or confirm the expected values, then select <strong>Verify label</strong> for a field-by-field result.</p></div>
         <button id="sampleButton" class="sample-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h10l4 4v14H5V3Z"/><path d="M15 3v5h5M8 12h8M8 16h6"/></svg>Try a working sample</button>
       </section>
 
@@ -50,7 +50,7 @@
             <div class="form-field"><label for="classType">Class or type</label><input id="classType" name="class_type" type="text" placeholder="Kentucky Straight Bourbon Whiskey" autocomplete="off" required /></div>
             <div class="form-field"><label for="alcoholContent">Alcohol content</label><input id="alcoholContent" name="alcohol_content" type="text" placeholder="45% Alc. by Vol." autocomplete="off" required /></div>
             <div class="form-field"><label for="netContents">Net contents</label><input id="netContents" name="net_contents" type="text" placeholder="750 mL" autocomplete="off" required /></div>
-            <div class="form-field field-wide"><div class="label-row"><label for="warningStatement">Government warning statement</label><span>Exact case and wording</span></div><textarea id="warningStatement" name="warning_statement" rows="4" placeholder="Enter the complete approved warning statement." required></textarea></div>
+            <div class="form-field field-wide"><div class="label-row"><label for="warningStatement">Government warning statement</label><span>Standard TTB text is prefilled; edit if needed</span></div><textarea id="warningStatement" name="warning_statement" rows="4" required></textarea></div>
           </div>
         </section>
 
@@ -65,6 +65,6 @@
       </section>
     </main>
     <footer class="site-footer">Label Verify · Standalone proof of concept · No images retained</footer>
-    <script src="./upload.js?v=9"></script>
+    <script src="./upload.js?v=10"></script>
   </body>
 </html>

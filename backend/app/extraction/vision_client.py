@@ -11,13 +11,16 @@ from pathlib import Path
 from typing import Optional
 
 import httpx
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps, UnidentifiedImageError
+from rapidfuzz import fuzz
 
 from app.extraction.errors import ExtractionUnavailableError, InvalidImageError
 from app.extraction.schema import ExtractedLabel
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_PIXELS = 20_000_000
+OCR_IMAGE_MAX_SIDE = 1280
+OCR_DETECTION_MAX_SIDE = 960
 LOCAL_MODEL_DIR = Path(__file__).resolve().parent / "models"
 LOCAL_DETECTION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_det_tiny.onnx"
 LOCAL_RECOGNITION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_rec_tiny.onnx"
@@ -38,11 +41,14 @@ def _normalize_image(image_bytes: bytes) -> bytes:
                 raise InvalidImageError(
                     "The image dimensions are invalid or exceed 20 megapixels."
                 )
-            image = image.convert("RGB")
-            # A 650 px bound is sufficient for label text while keeping peak
-            # detector memory within small container limits (for example,
-            # Render's free instance).
-            image.thumbnail((650, 650))
+            # Phone photos commonly rely on EXIF orientation. Applying it before
+            # OCR prevents otherwise readable labels from being processed on
+            # their side.
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            # Real bottle photos contain substantially smaller text than the
+            # generated fixtures. Keep enough detail for warning text while the
+            # detector's separate bound below controls inference memory.
+            image.thumbnail((OCR_IMAGE_MAX_SIDE, OCR_IMAGE_MAX_SIDE))
             output = BytesIO()
             image.save(output, format="PNG", optimize=True)
             return output.getvalue()
@@ -54,36 +60,179 @@ def _normalize_image(image_bytes: bytes) -> bytes:
         ) from exc
 
 
-# Simple heuristics for parsing OCR text into fields
-def _extract_from_text(text: str) -> dict:
+def _enhance_image(image_bytes: bytes) -> bytes:
+    """Create a high-contrast OCR variant for glare and low-light photos."""
+    with Image.open(BytesIO(image_bytes)) as image:
+        grayscale = ImageOps.grayscale(image)
+        grayscale = ImageOps.autocontrast(grayscale, cutoff=1)
+        grayscale = ImageEnhance.Contrast(grayscale).enhance(1.25)
+        grayscale = grayscale.filter(ImageFilter.SHARPEN)
+        output = BytesIO()
+        grayscale.save(output, format="PNG", optimize=True)
+        return output.getvalue()
+
+
+BEVERAGE_KEYWORDS = (
+    "ale",
+    "beer",
+    "bourbon",
+    "brandy",
+    "cabernet",
+    "chardonnay",
+    "cider",
+    "gin",
+    "ipa",
+    "lager",
+    "liqueur",
+    "merlot",
+    "porter",
+    "riesling",
+    "rum",
+    "sauvignon",
+    "stout",
+    "tequila",
+    "vodka",
+    "whiskey",
+    "whisky",
+    "wine",
+)
+
+CLASS_DESCRIPTOR_WORDS = {
+    "american",
+    "blended",
+    "bottled",
+    "bourbon",
+    "by",
+    "cabernet",
+    "chardonnay",
+    "corn",
+    "dry",
+    "flavored",
+    "from",
+    "grape",
+    "kentucky",
+    "malt",
+    "merlot",
+    "pinot",
+    "red",
+    "riesling",
+    "rose",
+    "rye",
+    "sauvignon",
+    "sparkling",
+    "straight",
+    "the",
+    "white",
+}
+
+
+def _is_utility_line(line: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:government\s+warning|net\s*(?:contents?)?|alc(?:ohol)?|"
+            r"proof|distilled|bottled|produced|imported|batch|lot|barcode)\b",
+            line,
+            re.IGNORECASE,
+        )
+        or re.search(r"\d{1,3}(?:\.\d+)?\s*%", line)
+    )
+
+
+def _looks_like_class_fragment(line: str) -> bool:
+    words = set(re.findall(r"[a-z]+", line.lower()))
+    known_words = CLASS_DESCRIPTOR_WORDS | set(BEVERAGE_KEYWORDS)
+    return bool(words) and (
+        any(keyword in line.lower() for keyword in BEVERAGE_KEYWORDS)
+        or words <= CLASS_DESCRIPTOR_WORDS
+        # OCR mistakes in a regulated designation (for example BOURBAN)
+        # should stay attached to the adjacent beverage word so comparison can
+        # correctly flag them for review.
+        or all(
+            max(fuzz.ratio(word, known_word) for known_word in known_words) >= 80
+            for word in words
+        )
+    )
+
+
+# Heuristics for parsing OCR text into fields. Optional line heights let the
+# parser use the visual hierarchy of a label instead of assuming that the very
+# first detected line is always the brand.
+def _extract_from_text(text: str, line_heights: list[float] | None = None) -> dict:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     joined = "\n".join(lines)
 
-    # Brand: assume first non-empty line
-    brand = lines[0] if lines else None
-
-    # Class/type normally sits between the brand and alcohol declaration. OCR
-    # commonly returns a wrapped designation as two boxes, so join those lines.
-    class_type = None
     alcohol_line = next(
         (index for index, line in enumerate(lines) if re.search(r"\d(?:\.\d+)?\s*%", line)),
         None,
     )
-    if alcohol_line is not None and alcohol_line > 1:
-        class_type = " ".join(lines[1:alcohol_line])
-    keywords = ("vodka", "whiskey", "whisky", "bourbon", "rum", "gin", "wine", "beer")
-    if not class_type:
-        for ln in lines[1:5]:
-            if any(keyword in ln.lower() for keyword in keywords):
-                class_type = ln
-                break
-    if not class_type and len(lines) > 1:
-        class_type = lines[1]
+    warning_line = next(
+        (index for index, line in enumerate(lines) if "warning" in line.lower()),
+        None,
+    )
+    brand_search_end = min(
+        (index for index in (alcohol_line, warning_line) if index is not None),
+        default=len(lines),
+    )
+
+    brand_index = 0 if lines else None
+    if lines and line_heights and len(line_heights) == len(lines):
+        candidates = [
+            index
+            for index, line in enumerate(lines[:brand_search_end])
+            if not _is_utility_line(line)
+            and "warning" not in line.lower()
+            and not re.match(r"^\(?\d\)?[.)]?\s", line)
+        ]
+        if candidates:
+            # Prefer the largest detected text, with a small top-of-label tie
+            # breaker. Perspective can make the line below a brand appear a
+            # few pixels taller, so choose the earliest candidate within 15%
+            # of the maximum instead of requiring the absolute maximum.
+            maximum_height = max(line_heights[index] for index in candidates)
+            brand_index = next(
+                index
+                for index in candidates
+                if line_heights[index] >= maximum_height * 0.85
+            )
+    brand = lines[brand_index] if brand_index is not None else None
+
+    # Class/type normally sits between the brand and alcohol declaration. OCR
+    # commonly returns a wrapped designation as two boxes, so join those lines.
+    class_type = None
+    search_end = alcohol_line if alcohol_line is not None else min(len(lines), 8)
+    designation_indexes = [
+        index
+        for index in range(search_end)
+        if index != brand_index
+        and not _is_utility_line(lines[index])
+        and any(keyword in lines[index].lower() for keyword in BEVERAGE_KEYWORDS)
+    ]
+    if designation_indexes:
+        start = end = designation_indexes[0]
+        while start > 0 and start - 1 != brand_index and _looks_like_class_fragment(
+            lines[start - 1]
+        ):
+            start -= 1
+        while end + 1 < search_end and end + 1 != brand_index and _looks_like_class_fragment(
+            lines[end + 1]
+        ):
+            end += 1
+        class_type = " ".join(lines[start : end + 1])
+    elif search_end:
+        fallback_lines = [
+            line
+            for index, line in enumerate(lines[:search_end])
+            if index != brand_index and not _is_utility_line(line)
+        ]
+        if fallback_lines:
+            # Class/type usually appears immediately above the alcohol
+            # declaration, so the last plausible line is safer than line two.
+            class_type = fallback_lines[-1]
 
     # Alcohol content (ABV)
     abv_match = re.search(
-        r"(\d{1,3}(?:\.\d+)?\s*%\s*"
-        r"(?:alc(?:ohol)?\.?\s*(?:by\s*)?vol(?:ume)?\.?|vol\.?)?"
+        r"((?:alc(?:ohol)?\.?\s*)?\d{1,3}(?:\.\d+)?\s*%\s*"
+        r"(?:(?:alc(?:ohol)?\.?\s*)?(?:by\s*)?vol(?:ume)?\.?|alc\.?/?vol\.?)?"
         r"(?:\s*\(\s*\d+(?:\.\d+)?\s*proof\s*\))?)",
         joined,
         re.IGNORECASE,
@@ -91,7 +240,11 @@ def _extract_from_text(text: str) -> dict:
     alcohol_content = abv_match.group(1) if abv_match else None
 
     # Net contents (ml, L)
-    net_match = re.search(r"(\d+(?:\.\d+)?\s*(?:m[lL]|[lL]))\b", joined)
+    net_match = re.search(
+        r"(\d+(?:\.\d+)?\s*(?:m[lL]|[lL]|c[lL]))\b",
+        joined,
+        re.IGNORECASE,
+    )
     net_contents = net_match.group(1) if net_match else None
 
     # Warning statement: preserve the complete warning, even when OCR wraps it.
@@ -223,10 +376,10 @@ def _get_rapidocr_engine():
 
                 _rapidocr_engine = RapidOCR(
                     params={
-                        "Global.max_side_len": 650,
+                        "Global.max_side_len": OCR_IMAGE_MAX_SIDE,
                         "Global.use_cls": False,
                         "Global.log_level": "warning",
-                        "Det.limit_side_len": 384,
+                        "Det.limit_side_len": OCR_DETECTION_MAX_SIDE,
                         "Det.limit_type": "max",
                         "Det.model_path": str(LOCAL_DETECTION_MODEL),
                         "Rec.model_path": str(LOCAL_RECOGNITION_MODEL),
@@ -245,30 +398,77 @@ def initialize_local_ocr() -> None:
         _get_rapidocr_engine()
 
 
-def _run_rapidocr(image_bytes: bytes) -> str:
+def _run_rapidocr(image_bytes: bytes) -> dict:
     """Run the shared ONNX OCR session safely outside the async event loop."""
     engine = _get_rapidocr_engine()
     with _rapidocr_inference_lock:
         result = engine(image_bytes, use_cls=False)
     texts = tuple(result.txts or ())
-    return "\n".join(texts)
+    boxes = tuple(result.boxes) if result.boxes is not None else ()
+    heights = [
+        float(max(point[1] for point in box) - min(point[1] for point in box))
+        for box in boxes
+    ]
+    return _extract_from_text(
+        "\n".join(texts),
+        heights if len(heights) == len(texts) else None,
+    )
+
+
+def _extraction_quality(fields: dict) -> int:
+    score = sum(bool(fields.get(field)) for field in fields)
+    warning = fields.get("warning_statement") or ""
+    if len(warning) >= 180 and "health problems" in warning.lower():
+        score += 2
+    return score
+
+
+def _merge_extractions(primary: dict, secondary: dict) -> dict:
+    merged = dict(primary)
+    for field, value in secondary.items():
+        if not merged.get(field) and value:
+            merged[field] = value
+    if len(secondary.get("warning_statement") or "") > len(
+        merged.get("warning_statement") or ""
+    ):
+        merged["warning_statement"] = secondary["warning_statement"]
+    return merged
 
 
 async def extract_label_fields(image_bytes: bytes) -> ExtractedLabel:
     """Extract fields locally, with provider and Tesseract fallbacks."""
     normalized_image = _normalize_image(image_bytes)
 
-    # The bundled ONNX path is first so deployed requests do not depend on an
-    # outbound network and can stay inside the stakeholder's five-second goal.
+    # Supplying a provider key is an explicit opt-in to the higher-accuracy
+    # vision path, which is particularly helpful for curved bottles,
+    # perspective distortion, and decorative typography. Local OCR remains the
+    # self-contained default and the provider's automatic fallback.
+    if os.getenv("LLM_API_KEY"):
+        label = await _call_provider(normalized_image)
+        if label is not None:
+            return label
+
+    local_fields = None
     if rapidocr_available():
         try:
-            ocr_text = await asyncio.to_thread(_run_rapidocr, normalized_image)
-            if ocr_text.strip():
-                return ExtractedLabel(**_extract_from_text(ocr_text))
+            local_fields = await asyncio.to_thread(_run_rapidocr, normalized_image)
+            # A second high-contrast pass is only charged when the first pass
+            # misses a field or truncates the long government warning.
+            if _extraction_quality(local_fields) < 7:
+                enhanced_image = await asyncio.to_thread(
+                    _enhance_image, normalized_image
+                )
+                enhanced_fields = await asyncio.to_thread(
+                    _run_rapidocr, enhanced_image
+                )
+                local_fields = _merge_extractions(local_fields, enhanced_fields)
+            if any(local_fields.values()):
+                return ExtractedLabel(**local_fields)
         except Exception as exc:  # Keep the optional fallbacks available.
             logger.warning("RapidOCR extraction failed: %s", type(exc).__name__)
 
-    # A configured vision provider can recover labels local OCR cannot read.
+    # This also covers unusual configurations where a provider key was added
+    # after the initial check above.
     label = await _call_provider(normalized_image)
     if label is not None:
         return label

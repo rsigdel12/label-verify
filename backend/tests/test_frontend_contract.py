@@ -61,3 +61,13 @@ def test_frontend_sample_and_batch_workflows_are_connected():
     assert 'fetch("/ready"' in script
     assert 'requestBody.append("files",file)' in script
     assert 'isBatch?"/verify/batch":"/verify"' in script
+
+
+def test_standard_government_warning_is_prefilled_but_editable():
+    markup = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    script = (FRONTEND / "upload.js").read_text(encoding="utf-8")
+
+    assert '<textarea id="warningStatement"' in markup
+    assert "readonly" not in markup
+    assert 'byId("warningStatement").value = STANDARD_WARNING;' in script
+    assert "According to the Surgeon General" in script
