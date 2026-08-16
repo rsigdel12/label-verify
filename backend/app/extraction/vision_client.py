@@ -21,8 +21,8 @@ from app.extraction.schema import ExtractedLabel
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_PIXELS = 20_000_000
-OCR_IMAGE_MAX_SIDE = 800
-OCR_DETECTION_MAX_SIDE = 768
+OCR_IMAGE_MAX_SIDE = 600
+OCR_DETECTION_MAX_SIDE = 576
 OCR_PREPROCESS_MAX_SIDE = 1600
 OCR_RETRY_MAX_SIDE = 960
 LOCAL_OCR_RETRY_CUTOFF_SECONDS = 2.25
@@ -725,6 +725,16 @@ def _extract_from_text(text: str, line_heights: list[float] | None = None) -> di
             # Class/type usually appears immediately above the alcohol
             # declaration, so the last plausible line is safer than line two.
             class_type = fallback_lines[-1]
+
+    if class_type:
+        # "whiskys" is not a valid designation plural; the final vertical
+        # stroke is a common low-resolution OCR artifact after WHISKY.
+        class_type = re.sub(
+            r"\bwhiskys\b",
+            lambda match: match.group(0)[:-1],
+            class_type,
+            flags=re.IGNORECASE,
+        )
 
     return {
         "brand_name": brand,

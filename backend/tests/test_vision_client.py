@@ -139,6 +139,14 @@ def test_ocr_parser_ignores_non_latin_logo_and_keeps_specific_scotch_type():
     assert parsed["net_contents"] == "750mL"
 
 
+def test_ocr_parser_removes_invalid_trailing_s_from_whisky():
+    parsed = vision_client._extract_from_text(
+        "GRANGESTONE\nHIGHLAND SINGLE MALT\nSCOTCH WHISKYS\n40% alc./vol.\n750ml"
+    )
+
+    assert parsed["class_type"] == "HIGHLAND SINGLE MALT SCOTCH WHISKY"
+
+
 def test_lower_detail_pass_can_replace_unreliable_full_view_measurements():
     merged = vision_client._merge_extractions(
         {"alcohol_content": "0% al/vol", "net_contents": "150mL"},

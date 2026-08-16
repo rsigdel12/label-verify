@@ -37,7 +37,7 @@ async function optimizeLocalUpload(file){
   try{
     const bitmap=await createImageBitmap(file),maxSide=2000,scale=Math.min(1,maxSide/Math.max(bitmap.width,bitmap.height)),canvas=document.createElement("canvas");
     canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));const context=canvas.getContext("2d");context.fillStyle="#fff";context.fillRect(0,0,canvas.width,canvas.height);context.drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close();
-    const blob=await new Promise(resolve=>canvas.toBlob(resolve,"image/jpeg",0.94));
+    const blob=await new Promise(resolve=>canvas.toBlob(resolve,"image/jpeg",0.98));
     return blob&&blob.size<file.size?new File([blob],file.name,{type:"image/jpeg",lastModified:file.lastModified}):file;
   }catch{return file}
 }
