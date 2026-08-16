@@ -24,7 +24,9 @@ OCR_IMAGE_MAX_SIDE = 720
 OCR_DETECTION_MAX_SIDE = 384
 VISION_IMAGE_MAX_SIDE = 1600
 AUTO_PROVIDER_TIMEOUT_SECONDS = 3.5
-ACCURATE_TIMEOUT_SECONDS = 15.0
+ACCURATE_TIMEOUT_SECONDS = 20.0
+ACCURATE_MAX_ATTEMPTS = 2
+ACCURATE_RETRY_DELAY_SECONDS = 0.4
 LABEL_FIELDS = (
     "brand_name",
     "class_type",
@@ -540,26 +542,56 @@ async def _call_gemini_provider(
     }
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
 
-    try:
-        async with asyncio.timeout(timeout_seconds):
-            async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-                response = await client.post(
-                    f"{base_url.rstrip('/')}/models/{model}:generateContent",
-                    json=payload,
-                    headers=headers,
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        for attempt in range(1, ACCURATE_MAX_ATTEMPTS + 1):
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    response = await client.post(
+                        f"{base_url.rstrip('/')}/models/{model}:generateContent",
+                        json=payload,
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+            except httpx.HTTPStatusError as exc:
+                retryable = exc.response.status_code == 429 or (
+                    500 <= exc.response.status_code < 600
                 )
-                response.raise_for_status()
-                data = response.json()
-    except (httpx.HTTPError, TimeoutError, ValueError, KeyError) as exc:
-        logger.warning("Gemini vision request failed: %s", type(exc).__name__)
-        return None
+                logger.warning(
+                    "Gemini vision attempt %d failed with HTTP %d.",
+                    attempt,
+                    exc.response.status_code,
+                )
+                if not retryable or attempt == ACCURATE_MAX_ATTEMPTS:
+                    return None
+            except (httpx.RequestError, TimeoutError, ValueError, KeyError) as exc:
+                logger.warning(
+                    "Gemini vision attempt %d failed: %s",
+                    attempt,
+                    type(exc).__name__,
+                )
+                if attempt == ACCURATE_MAX_ATTEMPTS:
+                    return None
+            else:
+                try:
+                    parts = data["candidates"][0]["content"]["parts"]
+                    content = "".join(part.get("text", "") for part in parts)
+                except (IndexError, KeyError, TypeError):
+                    content = ""
+                label = _label_from_json(content) if content else None
+                if label is not None:
+                    return label
+                logger.warning(
+                    "Gemini vision attempt %d returned no usable label.", attempt
+                )
+                if attempt == ACCURATE_MAX_ATTEMPTS:
+                    return None
 
-    try:
-        parts = data["candidates"][0]["content"]["parts"]
-        content = "".join(part.get("text", "") for part in parts)
-    except (IndexError, KeyError, TypeError):
-        return None
-    return _label_from_json(content) if content else None
+            # A short backoff recovers transient free-tier throttling and
+            # service errors without making successful requests slower.
+            await asyncio.sleep(ACCURATE_RETRY_DELAY_SECONDS * attempt)
+
+    return None
 
 
 async def _call_provider(
@@ -723,8 +755,8 @@ async def extract_label_fields(
                 return provider_label
         elif mode == "vision":
             raise ExtractionUnavailableError(
-                f"Accurate AI vision did not respond within "
-                f"{ACCURATE_TIMEOUT_SECONDS:g} seconds. Try again or choose Fast read."
+                "Accurate AI vision did not return a result after its provider attempts. "
+                "The free provider may be busy or rate-limited; try again or choose Fast read."
             )
 
     normalized_image = _normalize_image(image_bytes)

@@ -14,6 +14,7 @@ from app.extraction.vision_client import (
     vision_provider_configured,
 )
 from app.routes.batch import router as batch_router
+from app.routes.scan import router as scan_router
 from app.routes.verify import router as verify_router
 
 @asynccontextmanager
@@ -57,6 +58,7 @@ async def readiness_check() -> dict:
 # Register API routes BEFORE static files (so they take priority)
 app.include_router(verify_router)
 app.include_router(batch_router)
+app.include_router(scan_router)
 
 # Serve static frontend files from the adjacent ../frontend folder
 frontend_dir = pathlib.Path(__file__).resolve().parent.parent.parent / "frontend"

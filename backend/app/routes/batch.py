@@ -50,7 +50,9 @@ async def verify_batch(
             detail="application_data must be a JSON object or list of objects.",
         )
 
-    semaphore = asyncio.Semaphore(5)
+    # Free vision providers throttle bursts more aggressively than local OCR.
+    # A smaller Accurate-mode pool avoids creating our own HTTP 429 failures.
+    semaphore = asyncio.Semaphore(2 if mode == "vision" else 5)
 
     async def process_file(file: UploadFile, submitted: dict):
         file_started_at = time.perf_counter()

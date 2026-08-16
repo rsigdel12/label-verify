@@ -130,6 +130,29 @@ def test_verify_rejects_unknown_extraction_mode():
     )
 
 
+def test_scan_returns_detected_fields_without_application_data(monkeypatch):
+    calls = []
+
+    async def fake_extract(_image, mode):
+        calls.append(mode)
+        return ExtractedLabel(**submission())
+
+    monkeypatch.setattr("app.routes.scan.extract_label_fields", fake_extract)
+    response = client.post(
+        "/scan",
+        files={"file": ("label.png", image_bytes(), "image/png")},
+        data={"extraction_mode": "vision"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["extracted"] == submission()
+    assert "comparison" not in payload
+    assert "not a compliance decision" in payload["advisory"]
+    assert payload["processing_time_ms"] >= 0
+    assert calls == ["vision"]
+
+
 def test_verify_clean_fixture_end_to_end():
     metadata = json.loads(
         (FIXTURES / "fixture_01_clean_match.json").read_text(encoding="utf-8")

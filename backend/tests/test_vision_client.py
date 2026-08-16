@@ -174,7 +174,7 @@ def test_failed_vision_attempt_falls_back_to_local_ocr(monkeypatch):
     assert result.model_dump() == complete
 
 
-def test_vision_mode_fails_fast_instead_of_running_slow_local_fallback(monkeypatch):
+def test_vision_mode_reports_provider_failure_without_silent_local_fallback(monkeypatch):
     async def failed_provider(_image, timeout):
         assert timeout == vision_client.ACCURATE_TIMEOUT_SECONDS
         return None
@@ -192,7 +192,9 @@ def test_vision_mode_fails_fast_instead_of_running_slow_local_fallback(monkeypat
         ),
     )
 
-    with pytest.raises(vision_client.ExtractionUnavailableError, match="15 seconds"):
+    with pytest.raises(
+        vision_client.ExtractionUnavailableError, match="provider attempts"
+    ):
         asyncio.run(vision_client.extract_label_fields(b"image", "vision"))
 
 
@@ -329,3 +331,58 @@ def test_free_gemini_provider_sends_image_and_parses_schema(monkeypatch):
     assert config["responseMimeType"] == "application/json"
     assert config["responseJsonSchema"] == vision_client.LABEL_JSON_SCHEMA
     assert config["thinkingConfig"] == {"thinkingLevel": "LOW"}
+
+
+def test_gemini_retries_a_transient_service_failure(monkeypatch):
+    extracted = {
+        "brand_name": "Acme Spirits",
+        "class_type": "Vodka",
+        "alcohol_content": "40% Alc. by Vol.",
+        "net_contents": "750 mL",
+        "warning_statement": "GOVERNMENT WARNING: Exact warning.",
+    }
+    calls = []
+    serialized = json.dumps(extracted)
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, json, headers):
+            calls.append(url)
+            request = httpx.Request("POST", url)
+            if len(calls) == 1:
+                return httpx.Response(503, request=request)
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [{"text": serialized}]
+                            }
+                        }
+                    ]
+                },
+                request=request,
+            )
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "free-test-key")
+    monkeypatch.setattr(vision_client.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(vision_client.asyncio, "sleep", no_sleep)
+
+    result = asyncio.run(vision_client._call_provider(b"jpeg-bytes"))
+
+    assert result.model_dump() == extracted
+    assert len(calls) == 2

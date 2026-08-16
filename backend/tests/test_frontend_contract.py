@@ -41,6 +41,10 @@ def test_frontend_exposes_application_inputs_upload_and_timing_results():
         "roundTripTime",
         "extractionMode",
         "modeHelp",
+        "compareWorkflowButton",
+        "scanWorkflowButton",
+        "applicationSection",
+        "scanAdvisory",
     } <= parser.ids
 
 
@@ -92,4 +96,17 @@ def test_frontend_offers_fast_and_accurate_read_modes():
     assert '<option value="local">Fast' in markup
     assert '<option value="vision" disabled>Accurate' in markup
     assert "vision_provider_configured" in script
-    assert "Accurate AI vision may take 5–15 seconds." in script
+    assert "Accurate AI vision can take up to 40 seconds" in script
+
+
+def test_frontend_scan_only_and_new_label_reset_are_connected():
+    markup = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    script = (FRONTEND / "upload.js").read_text(encoding="utf-8")
+
+    assert "Scan label only" in markup
+    assert ">Check new label</button>" in markup
+    assert 'endpoint=scanOnly?"/scan"' in script
+    assert 'function renderScanResult(' in script
+    assert 'function resetForNewLabel()' in script
+    assert 'clearApplicationFields()' in script
+    assert "It does not approve the label" in script

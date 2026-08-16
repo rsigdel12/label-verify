@@ -3,9 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Compare alcohol label artwork with approved application details." />
+    <meta name="description" content="Scan alcohol label fields or compare label artwork with approved application details." />
     <title>Label Verify | Alcohol Label Review</title>
-    <link rel="stylesheet" href="./styles.css?v=5" />
+    <link rel="stylesheet" href="./styles.css?v=6" />
   </head>
   <body>
     <a class="skip-link" href="#mainContent">Skip to main content</a>
@@ -21,14 +21,22 @@
 
     <main id="mainContent" class="page-shell">
       <section class="intro" aria-labelledby="pageTitle">
-        <div><p class="eyebrow">AI-assisted compliance review</p><h1 id="pageTitle">Compare a label with its application</h1><p>Label Verify reads an alcohol label image and compares five required fields with the approved application. Upload a clear, close-up image, enter or confirm the expected values, then select <strong>Verify label</strong> for a field-by-field result.</p></div>
+        <div><p class="eyebrow">AI-assisted compliance review</p><h1 id="pageTitle">Scan or compare an alcohol label</h1><p>Label Verify can transcribe five fields from a label image or compare them with an approved application. Choose a task, upload a clear close-up image, and select Fast or Accurate reading.</p></div>
         <button id="sampleButton" class="sample-button" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h10l4 4v14H5V3Z"/><path d="M15 3v5h5M8 12h8M8 16h6"/></svg>Try a working sample</button>
       </section>
 
       <div id="noticeBanner" class="alert alert-success hidden" role="status" aria-live="polite"><span aria-hidden="true">✓</span><p id="noticeMessage"></p></div>
-      <div id="errorBanner" class="alert alert-error hidden" role="alert" tabindex="-1"><span aria-hidden="true">!</span><div><strong>Verification could not be completed</strong><p id="errorMessage"></p></div></div>
+      <div id="errorBanner" class="alert alert-error hidden" role="alert" tabindex="-1"><span aria-hidden="true">!</span><div><strong>The label could not be processed</strong><p id="errorMessage"></p></div></div>
 
       <form id="verifyForm" class="workflow-card">
+        <div class="workflow-choice">
+          <div><p class="eyebrow">Choose a task</p><h2>What would you like to do?</h2></div>
+          <div class="workflow-buttons" role="group" aria-label="Label workflow">
+            <button id="compareWorkflowButton" class="workflow-button active" type="button" aria-pressed="true"><strong>Compare with application</strong><span>Check expected values against the label</span></button>
+            <button id="scanWorkflowButton" class="workflow-button" type="button" aria-pressed="false"><strong>Scan label only</strong><span>Read and display visible label fields</span></button>
+          </div>
+          <p id="workflowHelp">Enter the approved application values, then compare them with the uploaded label.</p>
+        </div>
         <section class="workflow-section upload-section" aria-labelledby="uploadHeading">
           <div class="section-heading"><span class="step-number">1</span><div><p>Label artwork</p><h2 id="uploadHeading">Choose label image</h2></div></div>
           <div id="uploadArea" class="upload-area">
@@ -50,7 +58,7 @@
           </div>
         </section>
 
-        <section class="workflow-section application-section" aria-labelledby="applicationHeading">
+        <section id="applicationSection" class="workflow-section application-section" aria-labelledby="applicationHeading">
           <div class="section-heading"><span class="step-number">2</span><div><p>Approved record</p><h2 id="applicationHeading">Enter application values</h2></div></div>
           <p class="section-help">These are the expected values. For a batch, the same application is compared with every selected image.</p>
           <div class="field-grid">
@@ -62,17 +70,18 @@
           </div>
         </section>
 
-        <div class="form-actions"><p><strong>Automated check only.</strong> A compliance agent makes the final decision.</p><button id="submitButton" class="primary-button" type="submit" disabled><span class="button-label">Verify label</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button></div>
+        <div class="form-actions"><p id="actionHelp"><strong>Automated check only.</strong> A compliance agent makes the final decision.</p><button id="submitButton" class="primary-button" type="submit" disabled><span class="button-label">Verify label</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button></div>
       </form>
 
-      <section id="loading" class="loading-card hidden" aria-live="polite"><span class="spinner" aria-hidden="true"></span><div><h2>Reading and comparing the label</h2><p id="loadingMessage">This usually takes less than five seconds.</p><span id="loadingElapsed">Elapsed: 0.0 seconds</span></div></section>
+      <section id="loading" class="loading-card hidden" aria-live="polite"><span class="spinner" aria-hidden="true"></span><div><h2 id="loadingHeading">Reading and comparing the label</h2><p id="loadingMessage">This usually takes less than five seconds.</p><span id="loadingElapsed">Elapsed: 0.0 seconds</span></div></section>
       <section id="resultsSection" class="results-section hidden" aria-labelledby="resultsHeading" aria-live="polite" tabindex="-1">
-        <div id="resultSummary" class="result-summary"><span id="summaryIcon" class="summary-icon" aria-hidden="true"></span><div class="summary-copy"><p>Verification result</p><h2 id="resultsHeading"></h2><span id="resultCounts"></span></div><dl class="timing-list"><div><dt>Processing</dt><dd id="serverTime">—</dd></div><div><dt>Total request</dt><dd id="roundTripTime">—</dd></div></dl></div>
-        <div class="results-toolbar"><div><h2>Field comparison</h2><p>Application values are expected; label text is detected.</p></div><button id="verifyAnotherButton" class="secondary-button" type="button">Start another review</button></div>
+        <div id="resultSummary" class="result-summary"><span id="summaryIcon" class="summary-icon" aria-hidden="true"></span><div class="summary-copy"><p id="summaryLabel">Verification result</p><h2 id="resultsHeading"></h2><span id="resultCounts"></span></div><dl class="timing-list"><div><dt>Processing</dt><dd id="serverTime">—</dd></div><div><dt>Total request</dt><dd id="roundTripTime">—</dd></div></dl></div>
+        <div id="scanAdvisory" class="alert alert-warning hidden" role="status"><span aria-hidden="true">!</span><p id="scanAdvisoryText"></p></div>
+        <div class="results-toolbar"><div><h2 id="fieldResultsHeading">Field comparison</h2><p id="fieldResultsHelp">Application values are expected; label text is detected.</p></div><button id="verifyAnotherButton" class="secondary-button" type="button">Check new label</button></div>
         <div id="resultFields" class="result-fields"></div>
       </section>
     </main>
     <footer class="site-footer">Label Verify · Standalone proof of concept · No images retained</footer>
-    <script src="./upload.js?v=12"></script>
+    <script src="./upload.js?v=13"></script>
   </body>
 </html>

@@ -1,6 +1,6 @@
 # Label Verify
 
-A standalone proof of concept for comparing alcohol label artwork with an approved application. Reviewers upload one or more label images, enter the application values, and receive field-level `pass`, `fail`, or `needs_review` results with measured processing time.
+A standalone proof of concept for scanning alcohol label fields or comparing label artwork with an approved application. Reviewers can transcribe one label without entering an application, or upload one or more images and receive field-level `pass`, `fail`, or `needs_review` comparisons with measured processing time.
 
 Deployed application: <https://label-verify-p15v.onrender.com/>
 
@@ -9,7 +9,9 @@ Deployed application: <https://label-verify-p15v.onrender.com/>
 | Stakeholder need | Implementation |
 | --- | --- |
 | Obvious workflow for mixed technical comfort levels | One two-step screen, drag-and-drop upload, plain-language statuses, keyboard labels, responsive layout, and a one-click working sample |
-| Explicit speed/accuracy choice | **Fast** runs one bounded local OCR pass and targets under five seconds; **Accurate** uses contextual AI vision and may take 5–15 seconds |
+| Explicit speed/accuracy choice | **Fast** runs one bounded local OCR pass and targets under five seconds; **Accurate** uses contextual AI vision and retries one transient Gemini failure, taking up to about 40 seconds in the worst case |
+| Scan without an application | Scan-only mode displays the five detected fields with a clear warning that transcription is not a compliance decision |
+| Easy repeat reviews | **Check new label** clears the previous image, results, and application values while restoring the editable standard warning |
 | Compare label artwork with an application | The application form is the expected record; OCR text from the image is the actual value |
 | Required sample fields | Brand name, class/type, alcohol content, net contents, and complete government warning |
 | Faster application entry | The standard TTB government warning is prefilled and remains editable when an approved record differs |
@@ -35,7 +37,7 @@ The generated distilled-spirits fixtures follow the current TTB examples for the
 - `backend/tests/fixtures/` — eight generated label images with JSON application data and intended results.
 - `frontend/assets/sample-label.png` — self-contained sample used by the live demonstration.
 
-Each request selects its extractor explicitly. **Fast** is the default and keeps the image on the application server for one local OCR pass. **Accurate** sends a 1600-pixel JPEG to a configured vision provider with a strict five-field JSON schema. The recommended prototype provider is `gemini-3.5-flash`, which accepts image input and is available through Gemini's limited free API tier. Existing OpenAI deployments remain supported with `gpt-5.4-mini` through the Responses API. The prompt requires visible transcription rather than filling likely warning text from memory, and the provider attempt has a 15-second total deadline. The two paths are not run sequentially, so a failed Accurate request does not add local OCR time afterward.
+Each request selects its extractor explicitly. **Fast** is the default and keeps the image on the application server for one local OCR pass. **Accurate** sends a 1600-pixel JPEG to a configured vision provider with a strict five-field JSON schema. The recommended prototype provider is `gemini-3.5-flash`, which accepts image input and is available through Gemini's limited free API tier. Existing OpenAI deployments remain supported with `gpt-5.4-mini` through the Responses API. The prompt requires visible transcription rather than filling likely warning text from memory. Gemini gets two 20-second attempts with a short backoff for transient timeouts, HTTP 429 throttling, and server errors. Accurate batches are capped at two concurrent provider calls to reduce free-tier throttling. Successful requests still return immediately, and provider failure does not silently substitute less-accurate OCR.
 
 Fast mode uses RapidOCR locally. Images are normalized with Pillow, limited to 20 megapixels, corrected using phone-camera EXIF orientation, and resized to a 720-pixel bound. The PP-OCRv6 tiny detector is capped at 384 pixels to fit the Render instance. Its shared ONNX sessions are preloaded at application startup so model initialization is not charged to the first Fast request. The internal `auto` compatibility mode can add a targeted contrast-enhanced retry, but it is intentionally not shown in the UI because its latency is less predictable. A system Tesseract installation remains a final development fallback.
 
@@ -81,7 +83,7 @@ cd label-verify\backend
 python -m pytest -q
 ```
 
-The suite contains 54 tests, including per-request mode selection, Gemini and OpenAI vision request schemas, provider readiness/failure behavior, and real local OCR through both single and batch multipart endpoints. It also covers startup loading, enum classification, alternate ABV and net-content formats, warning uncertainty, validation and error responses, fixture integrity, timing fields, and the frontend/API contract.
+The suite contains 57 tests, including per-request mode selection, transient Gemini retry, Gemini and OpenAI request schemas, scan-only extraction, provider readiness/failure behavior, and real local OCR through single and batch multipart endpoints. It also covers startup loading, enum classification, alternate ABV and net-content formats, warning uncertainty, validation and error responses, fixture integrity, timing fields, reset behavior, and the frontend/API contract.
 
 Run the complete real-OCR fixture evaluation:
 
@@ -95,6 +97,7 @@ Fast mode completes all eight fixtures in under one second each on the reference
 
 - `GET /health` — process liveness.
 - `GET /ready` — local OCR, optional provider, and Tesseract readiness.
+- `POST /scan` — one image plus optional `extraction_mode`; returns detected fields and an advisory without requiring application data.
 - `POST /verify` — one image in `file`, JSON string in `application_data`, and optional `extraction_mode` (`local` or `vision`).
 - `POST /verify/batch` — images in `files`, either one shared application object or one object per image, and optional shared `extraction_mode`.
 
