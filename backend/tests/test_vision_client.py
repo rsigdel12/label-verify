@@ -116,6 +116,41 @@ def test_ocr_parser_joins_measurements_split_across_three_boxes():
     assert parsed["net_contents"] == "750 mL"
 
 
+def test_ocr_parser_ignores_non_latin_logo_and_keeps_specific_scotch_type():
+    parsed = vision_client._extract_from_text(
+        "费\nGRANGESTONE\nHIGHLAND SINGLE MALT\nSCOTCH WHISKY\n"
+        "This Single Malt Scotch Whisky has been matured in oak.\n"
+        "750m 40% al/ ol",
+        line_heights=[103, 43, 28, 29, 19, 30],
+    )
+
+    assert parsed["brand_name"] == "GRANGESTONE"
+    assert parsed["class_type"] == "HIGHLAND SINGLE MALT SCOTCH WHISKY"
+    assert parsed["alcohol_content"] == "40% al/ ol"
+    assert parsed["net_contents"] == "750mL"
+
+
+def test_lower_detail_pass_can_replace_unreliable_full_view_measurements():
+    merged = vision_client._merge_extractions(
+        {"alcohol_content": "0% al/vol", "net_contents": "150mL"},
+        {"alcohol_content": "40% al/vol", "net_contents": "750mL"},
+        prefer_measurements=True,
+    )
+
+    assert merged["alcohol_content"] == "40% al/vol"
+    assert merged["net_contents"] == "750mL"
+
+
+def test_ocr_parser_rejects_unrelated_text_as_warning():
+    parsed = vision_client._extract_from_text(
+        "Brand\nSCOTCH WHISKY\nAccording to the Surgeon General\n"
+        "AROMA smoke and dried fruit TASTE mellow FINISH oak imported by example "
+        "750mL 40% alc/vol"
+    )
+
+    assert parsed["warning_statement"] is None
+
+
 def test_merge_prefers_more_accurate_warning_not_merely_longer_warning():
     noisy = (
         "GOVERNMENT WARNING: (1) Acording to the Surgeon General, women should "

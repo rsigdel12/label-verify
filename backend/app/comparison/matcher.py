@@ -133,7 +133,7 @@ def _net_contents_ml(value: str | None) -> Decimal | None:
     if value is None:
         return None
     match = re.search(
-        r"(\d+(?:[.,]\d+)?)\s*(m(?:l|1)|rn(?:l|1)|millilit(?:er|re)s?|cl|centilit(?:er|re)s?|"
+        r"(\d+(?:[.,]\d+)?)\s*(m(?:l|1)?|rn(?:l|1)|millilit(?:er|re)s?|cl|centilit(?:er|re)s?|"
         r"l|lit(?:er|re)s?|fl\.?\s*oz\.?|fluid\s+ounces?|oz\.?)\b",
         str(value),
         flags=re.IGNORECASE,

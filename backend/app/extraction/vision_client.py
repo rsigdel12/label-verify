@@ -21,9 +21,10 @@ from app.extraction.schema import ExtractedLabel
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_PIXELS = 20_000_000
-OCR_IMAGE_MAX_SIDE = 1400
-OCR_DETECTION_MAX_SIDE = 1280
+OCR_IMAGE_MAX_SIDE = 1100
+OCR_DETECTION_MAX_SIDE = 1024
 OCR_PREPROCESS_MAX_SIDE = 1600
+OCR_RETRY_MAX_SIDE = 960
 LOCAL_OCR_RETRY_CUTOFF_SECONDS = 2.25
 VISION_IMAGE_MAX_SIDE = 1600
 AUTO_PROVIDER_TIMEOUT_SECONDS = 3.5
@@ -279,7 +280,10 @@ def _prepare_ocr_image(image_bytes: bytes) -> bytes:
         rgb = _warp_quad(rgb, quad)
 
     height, width = rgb.shape[:2]
-    scale = min(1.5, OCR_IMAGE_MAX_SIDE / max(width, height))
+    # Upscaling does not invent detail, but it gives the detector enough pixels
+    # to separate 3-6px lettering in screenshots and messaging-app exports.
+    # The old 1.5x cap left the supplied 295px-wide label at only 375x880.
+    scale = min(5.0, OCR_IMAGE_MAX_SIDE / max(width, height))
     if max(width, height) > OCR_IMAGE_MAX_SIDE or scale > 1.05:
         interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
         rgb = cv2.resize(
@@ -315,11 +319,24 @@ def _prepare_ocr_retry_image(image_bytes: bytes, region: str) -> bytes:
     image = _load_rgb_image(image_bytes)
     width, height = image.size
     if region == "upper":
-        image = image.crop((0, 0, width, max(1, round(height * 0.7))))
+        image = image.crop((0, 0, width, max(1, round(height * 0.58))))
     elif region == "lower":
-        image = image.crop((0, round(height * 0.3), width, height))
+        # Warning, net contents, and ABV commonly share the lower declaration
+        # panel. Excluding the barcode/footer gives that small type ~2x more
+        # detector pixels than retrying the entire lower 70%.
+        image = image.crop(
+            (0, round(height * 0.55), width, max(1, round(height * 0.86)))
+        )
 
-    image.thumbnail((OCR_IMAGE_MAX_SIDE, OCR_IMAGE_MAX_SIDE))
+    retry_scale = min(5.0, OCR_RETRY_MAX_SIDE / max(image.size))
+    if retry_scale != 1.0:
+        image = image.resize(
+            (
+                max(1, round(image.width * retry_scale)),
+                max(1, round(image.height * retry_scale)),
+            ),
+            Image.Resampling.LANCZOS,
+        )
     gray = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2GRAY)
     gray = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(gray)
     blurred = cv2.GaussianBlur(gray, (0, 0), 0.75)
@@ -385,6 +402,7 @@ CLASS_DESCRIPTOR_WORDS = {
     "flavored",
     "from",
     "grape",
+    "highland",
     "kentucky",
     "malt",
     "merlot",
@@ -395,6 +413,7 @@ CLASS_DESCRIPTOR_WORDS = {
     "rye",
     "sauvignon",
     "sparkling",
+    "single",
     "straight",
     "the",
     "white",
@@ -414,7 +433,8 @@ def _is_utility_line(line: str) -> bool:
 
 
 ALCOHOL_HINT = re.compile(
-    r"(?:a[l1i]c(?:[o0]h[o0]l)?|abv|by\s+vo[l1](?:ume)?|vo[l1]\.?|proof)",
+    r"(?:a[l1i]c(?:[o0]h[o0]l)?|abv|by\s+vo[l1](?:ume)?|"
+    r"[a-z01]{0,4}\s*/\s*[a-z01/]{1,5}|vo[l1]\.?|proof)",
     re.IGNORECASE,
 )
 PERCENT_VALUE = re.compile(
@@ -424,7 +444,7 @@ PERCENT_VALUE = re.compile(
 PROOF_VALUE = re.compile(r"\b(\d{1,3}(?:[.,]\d+)?)\s*proof\b", re.IGNORECASE)
 NET_CONTENTS_VALUE = re.compile(
     r"\b\d+(?:[.,]\d+)?\s*(?:"
-    r"m(?:l|1)|rn(?:l|1)|millilit(?:er|re)s?|c(?:l|1)|centilit(?:er|re)s?|"
+    r"m(?:l|1|[|!])?|rn(?:l|1)|millilit(?:er|re)s?|c(?:l|1)|centilit(?:er|re)s?|"
     r"l|lit(?:er|re)s?|fl\.?\s*oz\.?|fluid\s+ounces?|oz\.?)\b",
     re.IGNORECASE,
 )
@@ -472,6 +492,9 @@ def _extract_alcohol_content(lines: list[str]) -> tuple[str | None, int | None]:
                 " ".join(lines[index : index + window_size])
             )
             if _looks_like_alcohol_line(combined):
+                leading_measurement = NET_CONTENTS_VALUE.match(combined)
+                if leading_measurement:
+                    combined = combined[leading_measurement.end() :].strip(" -|,;")
                 candidates.append((combined, index))
     if candidates:
 
@@ -519,7 +542,11 @@ def _extract_net_contents(lines: list[str]) -> str | None:
         ),
     )
     match = NET_CONTENTS_VALUE.search(selected)
-    return match.group(0) if match else None
+    if not match:
+        return None
+    value = match.group(0)
+    # The final vertical stroke in "mL" is frequently lost at small sizes.
+    return f"{value}L" if re.search(r"\d\s*m$", value, re.IGNORECASE) else value
 
 
 def _warning_heading_score(line: str) -> float:
@@ -554,6 +581,7 @@ def _extract_warning(lines: list[str]) -> str | None:
         ),
         None,
     )
+    heading_detected = start is not None
     if start is None:
         # Preserve the body when the small heading alone was unreadable. The
         # comparison layer will require manual review because the heading could
@@ -580,13 +608,25 @@ def _extract_warning(lines: list[str]) -> str | None:
         warning_lines.append(line)
         if fuzz.partial_ratio("may cause health problems", line.casefold()) >= 88:
             break
-    return " ".join(warning_lines)
+    warning = " ".join(warning_lines)
+    # A fuzzy body-anchor match can occasionally start inside unrelated label
+    # copy on extremely small images. Do not return a long block of garbage as
+    # the regulated warning unless the overall wording has meaningful support.
+    return (
+        warning
+        if heading_detected or _warning_transcription_score(warning) >= 55
+        else None
+    )
 
 
 def _looks_like_class_fragment(line: str) -> bool:
     words = set(re.findall(r"[a-z]+", line.lower()))
     known_words = CLASS_DESCRIPTOR_WORDS | set(BEVERAGE_KEYWORDS)
-    return bool(words) and (
+    looks_like_sentence = bool(
+        re.match(r"^(?:this|that|a|an|our)\b", line.strip(), re.IGNORECASE)
+        or len(words) > 7
+    )
+    return bool(words) and not looks_like_sentence and (
         any(keyword in line.lower() for keyword in BEVERAGE_KEYWORDS)
         or words <= CLASS_DESCRIPTOR_WORDS
         # OCR mistakes in a regulated designation (for example BOURBAN)
@@ -624,6 +664,7 @@ def _extract_from_text(text: str, line_heights: list[float] | None = None) -> di
             index
             for index, line in enumerate(lines[:brand_search_end])
             if not _is_utility_line(line)
+            and bool(re.search(r"[A-Za-z]", line))
             and "warning" not in line.lower()
             and not re.match(r"^\(?\d\)?[.)]?\s", line)
         ]
@@ -957,16 +998,34 @@ def _extraction_quality(fields: dict) -> int:
     return score
 
 
-def _retry_regions(fields: dict) -> tuple[str, ...]:
+def _alcohol_percentage(value: str | None) -> float | None:
+    if not value:
+        return None
+    match = PERCENT_VALUE.search(_normalize_numeric_ocr(value))
+    if not match:
+        proof_match = PROOF_VALUE.search(_normalize_numeric_ocr(value))
+        return float(proof_match.group(1).replace(",", ".")) / 2 if proof_match else None
+    return float(match.group(1).replace(",", "."))
+
+
+def _alcohol_is_plausible(value: str | None) -> bool:
+    percentage = _alcohol_percentage(value)
+    return percentage is not None and 0 < percentage <= 100
+
+
+def _retry_regions(fields: dict, retry_warning: bool = True) -> tuple[str, ...]:
     """Choose no more than two detail views for fields missing from a pass."""
     missing_upper = (
         not fields.get("brand_name")
         or classify_alcohol_type(fields.get("class_type"))[0] is None
-        or not fields.get("alcohol_content")
     )
     missing_lower = (
-        not fields.get("net_contents")
-        or not _warning_is_complete(fields.get("warning_statement"))
+        not _alcohol_is_plausible(fields.get("alcohol_content"))
+        or not fields.get("net_contents")
+        or (
+            retry_warning
+            and not _warning_is_complete(fields.get("warning_statement"))
+        )
     )
     if missing_upper and missing_lower:
         return ("upper", "lower")
@@ -977,7 +1036,9 @@ def _retry_regions(fields: dict) -> tuple[str, ...]:
     return ()
 
 
-def _merge_extractions(primary: dict, secondary: dict) -> dict:
+def _merge_extractions(
+    primary: dict, secondary: dict, prefer_measurements: bool = False
+) -> dict:
     merged = dict(primary)
     for field, value in secondary.items():
         if not merged.get(field) and value:
@@ -992,6 +1053,13 @@ def _merge_extractions(primary: dict, secondary: dict) -> dict:
         len(primary_warning or ""),
     ):
         merged["warning_statement"] = secondary["warning_statement"]
+    if _alcohol_is_plausible(secondary.get("alcohol_content")) and (
+        prefer_measurements
+        or not _alcohol_is_plausible(merged.get("alcohol_content"))
+    ):
+        merged["alcohol_content"] = secondary["alcohol_content"]
+    if prefer_measurements and secondary.get("net_contents"):
+        merged["net_contents"] = secondary["net_contents"]
     primary_type, _ = classify_alcohol_type(merged.get("class_type"))
     secondary_type, _ = classify_alcohol_type(secondary.get("class_type"))
     if secondary_type is not None and (
@@ -1063,7 +1131,22 @@ async def extract_label_fields(
                 merged_fields = _merge_extractions(provider_fields, local_fields)
                 if any(merged_fields.values()):
                     return ExtractedLabel(**merged_fields)
-            retry_regions = _retry_regions(local_fields)
+            # On very small exports the statutory warning letters contain too
+            # few source pixels for a trustworthy transcription. Retrying it
+            # only burns CPU; still retry if ABV or net contents are missing.
+            try:
+                with Image.open(BytesIO(image_bytes)) as uploaded_image:
+                    small_export = min(uploaded_image.size) < 600
+            except (UnidentifiedImageError, OSError, ValueError):
+                # Unit-test stubs and alternate decoders may not expose a PIL
+                # header here. Default to the normal high-resolution behavior.
+                small_export = False
+            retry_warning = not small_export
+            retry_regions = _retry_regions(local_fields, retry_warning)
+            if small_export and "lower" not in retry_regions:
+                # A focused declaration pass is cheap and more reliable than
+                # measurements read from the full view of a tiny export.
+                retry_regions += ("lower",)
             for region in retry_regions:
                 # Regional views retain more source pixels for small type. A
                 # strict cutoff prevents retries from pushing a slow machine
@@ -1077,7 +1160,11 @@ async def extract_label_fields(
                     _prepare_ocr_retry_image, image_bytes, region
                 )
                 retry_fields = await asyncio.to_thread(_run_rapidocr, retry_image)
-                local_fields = _merge_extractions(local_fields, retry_fields)
+                local_fields = _merge_extractions(
+                    local_fields,
+                    retry_fields,
+                    prefer_measurements=region == "lower",
+                )
                 if _extraction_quality(local_fields) >= 7:
                     break
             if local_fields and any(local_fields.values()):
