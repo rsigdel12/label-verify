@@ -18,6 +18,6 @@
     "class_type": "pass",
     "alcohol_content": "pass",
     "net_contents": "pass",
-    "warning_statement": "fail"
+    "warning_statement": "pass"
   }
 }

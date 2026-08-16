@@ -36,13 +36,13 @@ def test_brand_name_case_difference_should_pass_fuzzy_matching():
     assert result["brand_name"]["status"] == "pass"
 
 
-def test_warning_statement_wrong_casing_should_fail():
+def test_warning_statement_case_difference_should_pass():
     extracted = ExtractedLabel(warning_statement="Contains Sulfites.")
     submitted = {"warning_statement": "contains sulfites."}
 
     result = compare_fields(extracted, submitted)
 
-    assert result["warning_statement"]["status"] == "fail"
+    assert result["warning_statement"]["status"] == "pass"
 
 
 def test_different_abv_should_fail():

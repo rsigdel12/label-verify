@@ -15,7 +15,7 @@ from app.extraction.schema import ExtractedLabel
 def _normalize_text(value: str | None) -> str:
     if value is None:
         return ""
-    return " ".join(str(value).strip().split()).lower()
+    return " ".join(str(value).strip().split()).casefold()
 
 
 def _comparison(status: str, expected: str | None, actual: str | None, **details) -> dict:
@@ -87,7 +87,7 @@ def _compare_exact(expected: str | None, actual: str | None) -> dict:
     if expected is None or actual is None:
         return _comparison("needs_review", expected, actual)
 
-    status = "pass" if str(expected).strip() == str(actual).strip() else "fail"
+    status = "pass" if _normalize_text(expected) == _normalize_text(actual) else "fail"
     return _comparison(status, expected, actual)
 
 
@@ -171,16 +171,20 @@ def _compare_warning_statement(expected: str | None, actual: str | None) -> dict
     if expected is None or actual is None:
         return _comparison("needs_review", expected, actual)
 
-    # Whitespace is a layout/OCR segmentation detail. Removing it avoids false
-    # failures when glare joins two adjacent words, while casing, punctuation,
-    # spelling, numbering, and word order must still be exact.
-    normalized_expected = re.sub(r"\s+", "", str(expected).strip())
-    normalized_actual = re.sub(r"\s+", "", str(actual).strip())
+    # Whitespace and capitalization are presentation details for this
+    # prototype. Spelling, punctuation, numbering, and word order still need
+    # to match.
+    normalized_expected = re.sub(r"\s+", "", str(expected).strip()).casefold()
+    normalized_actual = re.sub(r"\s+", "", str(actual).strip()).casefold()
     if normalized_expected == normalized_actual:
         return _comparison("pass", expected, actual, similarity=100.0)
 
-    similarity = fuzz.ratio(str(expected).strip(), str(actual).strip())
-    heading_verified = bool(re.match(r"^GOVERNMENT\s+WARNING\s*:", str(actual).strip()))
+    similarity = fuzz.ratio(
+        str(expected).strip().casefold(), str(actual).strip().casefold()
+    )
+    heading_verified = bool(
+        re.match(r"^government\s+warning\s*:", str(actual).strip(), re.IGNORECASE)
+    )
     # A near-complete OCR transcription is evidence that the warning is
     # present, but it is not safe to approve exact regulated wording when OCR
     # dropped punctuation or confused a character.

@@ -20,8 +20,9 @@ from app.extraction.schema import ExtractedLabel
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_PIXELS = 20_000_000
-OCR_IMAGE_MAX_SIDE = 720
-OCR_DETECTION_MAX_SIDE = 384
+OCR_IMAGE_MAX_SIDE = 960
+OCR_DETECTION_MAX_SIDE = 512
+OCR_PREPROCESS_MAX_SIDE = 1400
 VISION_IMAGE_MAX_SIDE = 1600
 AUTO_PROVIDER_TIMEOUT_SECONDS = 3.5
 ACCURATE_TIMEOUT_SECONDS = 20.0
@@ -94,6 +95,18 @@ def _normalize_image(
     max_side: int = OCR_IMAGE_MAX_SIDE,
     output_format: str = "PNG",
 ) -> bytes:
+    image = _load_rgb_image(image_bytes)
+    image.thumbnail((max_side, max_side))
+    output = BytesIO()
+    if output_format == "JPEG":
+        image.save(output, format="JPEG", quality=90, optimize=True)
+    else:
+        image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def _load_rgb_image(image_bytes: bytes) -> Image.Image:
+    """Validate an upload and return an EXIF-corrected RGB image."""
     if not image_bytes:
         raise InvalidImageError("The uploaded image is empty.")
 
@@ -109,22 +122,163 @@ def _normalize_image(
             # OCR prevents otherwise readable labels from being processed on
             # their side.
             image = ImageOps.exif_transpose(image).convert("RGB")
-            # Real bottle photos contain substantially smaller text than the
-            # generated fixtures. Keep enough detail for warning text while the
-            # detector's separate bound below controls inference memory.
-            image.thumbnail((max_side, max_side))
-            output = BytesIO()
-            if output_format == "JPEG":
-                image.save(output, format="JPEG", quality=90, optimize=True)
-            else:
-                image.save(output, format="PNG", optimize=True)
-            return output.getvalue()
+            return image
     except InvalidImageError:
         raise
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise InvalidImageError(
             "The uploaded file is not a valid PNG, JPEG, WEBP, or GIF image."
         ) from exc
+
+
+def _order_quad(points):
+    import numpy as np
+
+    ordered = np.zeros((4, 2), dtype="float32")
+    point_sums = points.sum(axis=1)
+    point_differences = np.diff(points, axis=1).reshape(-1)
+    ordered[0] = points[point_sums.argmin()]
+    ordered[2] = points[point_sums.argmax()]
+    ordered[1] = points[point_differences.argmin()]
+    ordered[3] = points[point_differences.argmax()]
+    return ordered
+
+
+def _find_label_quad(image):
+    """Return one confident label boundary, preserving the full image if ambiguous."""
+    import cv2
+    import numpy as np
+
+    height, width = image.shape[:2]
+    image_area = float(width * height)
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    median = float(np.median(blurred))
+    lower = int(max(20, median * 0.66))
+    upper = int(min(255, max(lower + 40, median * 1.33)))
+    edges = cv2.Canny(blurred, lower, upper)
+    edges = cv2.morphologyEx(
+        edges,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7)),
+        iterations=2,
+    )
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candidates = []
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        area_ratio = area / image_area
+        if area_ratio < 0.12 or area_ratio > 0.98:
+            continue
+        perimeter = cv2.arcLength(contour, True)
+        approximation = cv2.approxPolyDP(contour, 0.025 * perimeter, True)
+        if len(approximation) != 4 or not cv2.isContourConvex(approximation):
+            continue
+        rectangle = cv2.minAreaRect(contour)
+        rectangle_area = float(rectangle[1][0] * rectangle[1][1])
+        rectangularity = area / rectangle_area if rectangle_area else 0.0
+        if rectangularity < 0.72:
+            continue
+        quad = _order_quad(approximation.reshape(4, 2).astype("float32"))
+        target_width = max(
+            np.linalg.norm(quad[1] - quad[0]), np.linalg.norm(quad[2] - quad[3])
+        )
+        target_height = max(
+            np.linalg.norm(quad[3] - quad[0]), np.linalg.norm(quad[2] - quad[1])
+        )
+        aspect_ratio = target_width / max(1.0, target_height)
+        if min(target_width, target_height) < 120 or not 0.3 <= aspect_ratio <= 3.5:
+            continue
+        candidates.append((area_ratio * rectangularity, area, quad))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    best_score, best_area, best_quad = candidates[0]
+    if best_score < 0.1:
+        return None
+    # Multiple substantial panels usually mean complete flat artwork. Cropping
+    # to only one would discard fields, so retain the full upload.
+    if len(candidates) > 1 and candidates[1][1] >= best_area * 0.45:
+        return None
+    center = best_quad.mean(axis=0)
+    return np.clip(
+        center + (best_quad - center) * 1.025,
+        [0, 0],
+        [width - 1, height - 1],
+    )
+
+
+def _warp_quad(image, quad):
+    import cv2
+    import numpy as np
+
+    ordered = _order_quad(quad)
+    width = int(
+        max(
+            np.linalg.norm(ordered[1] - ordered[0]),
+            np.linalg.norm(ordered[2] - ordered[3]),
+        )
+    )
+    height = int(
+        max(
+            np.linalg.norm(ordered[3] - ordered[0]),
+            np.linalg.norm(ordered[2] - ordered[1]),
+        )
+    )
+    destination = np.array(
+        [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
+        dtype="float32",
+    )
+    transform = cv2.getPerspectiveTransform(ordered, destination)
+    return cv2.warpPerspective(
+        image,
+        transform,
+        (width, height),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+
+
+def _prepare_ocr_image(image_bytes: bytes) -> bytes:
+    """Crop, deskew, and improve local contrast before the single OCR pass."""
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return _enhance_image(_normalize_image(image_bytes))
+
+    image = _load_rgb_image(image_bytes)
+    image.thumbnail((OCR_PREPROCESS_MAX_SIDE, OCR_PREPROCESS_MAX_SIDE))
+    rgb = np.asarray(image)
+    quad = _find_label_quad(rgb)
+    if quad is not None:
+        rgb = _warp_quad(rgb, quad)
+
+    height, width = rgb.shape[:2]
+    scale = min(1.5, OCR_IMAGE_MAX_SIDE / max(width, height))
+    if max(width, height) > OCR_IMAGE_MAX_SIDE or scale > 1.05:
+        interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
+        rgb = cv2.resize(
+            rgb,
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=interpolation,
+        )
+
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+    luminance, channel_a, channel_b = cv2.split(lab)
+    luminance = cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8)).apply(luminance)
+    enhanced = cv2.cvtColor(
+        cv2.merge((luminance, channel_a, channel_b)), cv2.COLOR_LAB2RGB
+    )
+    softened = cv2.GaussianBlur(enhanced, (0, 0), 0.8)
+    enhanced = cv2.addWeighted(enhanced, 1.12, softened, -0.12, 0)
+    success, encoded = cv2.imencode(
+        ".jpg",
+        cv2.cvtColor(enhanced, cv2.COLOR_RGB2BGR),
+        [int(cv2.IMWRITE_JPEG_QUALITY), 92],
+    )
+    return encoded.tobytes() if success else _normalize_image(image_bytes)
 
 
 def _enhance_image(image_bytes: bytes, region: str = "full") -> bytes:
@@ -227,6 +381,12 @@ NET_CONTENTS_VALUE = re.compile(
 )
 
 
+def _normalize_numeric_ocr(line: str) -> str:
+    """Correct high-confidence letter/number confusions inside measurements."""
+    normalized = re.sub(r"(?<=\d)[oO](?=\d|[.,%\s]|$)", "0", line)
+    return re.sub(r"(?<=\d)[iI](?=\d|[.,%\s]|$)", "1", normalized)
+
+
 def _looks_like_alcohol_line(line: str) -> bool:
     return bool(
         PROOF_VALUE.search(line)
@@ -236,19 +396,24 @@ def _looks_like_alcohol_line(line: str) -> bool:
 
 def _extract_alcohol_content(lines: list[str]) -> tuple[str | None, int | None]:
     for index, line in enumerate(lines):
-        if _looks_like_alcohol_line(line):
-            return line, index
+        normalized_line = _normalize_numeric_ocr(line)
+        if _looks_like_alcohol_line(normalized_line):
+            return normalized_line, index
 
     # OCR sometimes splits "ALCOHOL" and "40% BY VOLUME" into adjacent boxes.
     for index in range(len(lines) - 1):
-        combined = f"{lines[index]} {lines[index + 1]}"
+        combined = _normalize_numeric_ocr(f"{lines[index]} {lines[index + 1]}")
         if _looks_like_alcohol_line(combined):
             return combined, index
     return None, None
 
 
 def _extract_net_contents(lines: list[str]) -> str | None:
-    candidates = [line for line in lines if NET_CONTENTS_VALUE.search(line)]
+    candidates = [
+        _normalize_numeric_ocr(line)
+        for line in lines
+        if NET_CONTENTS_VALUE.search(_normalize_numeric_ocr(line))
+    ]
     if not candidates:
         return None
     # Prefer an explicitly labeled declaration over an isolated measurement.
@@ -626,9 +791,12 @@ def _get_rapidocr_engine():
                     params={
                         "Global.max_side_len": OCR_IMAGE_MAX_SIDE,
                         "Global.use_cls": False,
+                        "Global.text_score": 0.45,
                         "Global.log_level": "warning",
                         "Det.limit_side_len": OCR_DETECTION_MAX_SIDE,
                         "Det.limit_type": "max",
+                        "Det.box_thresh": 0.45,
+                        "Det.max_candidates": 600,
                         "Det.model_path": str(LOCAL_DETECTION_MODEL),
                         "Rec.model_path": str(LOCAL_RECOGNITION_MODEL),
                         # ONNX Runtime otherwise creates a thread per detected
@@ -720,7 +888,7 @@ async def extract_label_fields(
 ) -> ExtractedLabel:
     """Extract using the requested fast, accurate, or compatibility mode.
 
-    ``local`` is the user-facing Fast mode and performs one bounded OCR pass.
+    ``local`` is the user-facing Fast mode and performs one preprocessed OCR pass.
     ``vision`` is the user-facing Accurate mode and never adds local OCR latency.
     ``auto`` remains available for API compatibility and may combine both.
     """
@@ -759,7 +927,9 @@ async def extract_label_fields(
                 "The free provider may be busy or rate-limited; try again or choose Fast read."
             )
 
-    normalized_image = _normalize_image(image_bytes)
+    # Keep the provider path unchanged. Only local OCR receives the
+    # confidence-gated crop, perspective correction, and contrast enhancement.
+    normalized_image = await asyncio.to_thread(_prepare_ocr_image, image_bytes)
     local_fields = None
     if rapidocr_available():
         try:

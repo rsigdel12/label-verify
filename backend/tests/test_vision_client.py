@@ -95,6 +95,15 @@ def test_ocr_parser_handles_proof_and_fluid_ounces():
     assert parsed["net_contents"] == "12 FL. OZ"
 
 
+def test_ocr_parser_corrects_numeric_letter_confusions_in_measurements():
+    parsed = vision_client._extract_from_text(
+        "Example Brand\nVODKA\n4O% ALC. BY VOL.\nNET CONTENTS 75O mL"
+    )
+
+    assert parsed["alcohol_content"] == "40% ALC. BY VOL."
+    assert parsed["net_contents"] == "750 mL"
+
+
 def test_bundled_local_ocr_reads_clean_fixture(monkeypatch):
     fixture = Path(__file__).parent / "fixtures" / "fixture_01_clean_match.png"
     monkeypatch.delenv("LLM_API_KEY", raising=False)
@@ -165,6 +174,7 @@ def test_failed_vision_attempt_falls_back_to_local_ocr(monkeypatch):
     monkeypatch.setattr(
         vision_client, "_normalize_image", lambda image, **_kwargs: image
     )
+    monkeypatch.setattr(vision_client, "_prepare_ocr_image", lambda image: image)
     monkeypatch.setattr(vision_client, "rapidocr_available", lambda: True)
     monkeypatch.setattr(vision_client, "_run_rapidocr", lambda _image: complete)
     monkeypatch.setattr(vision_client, "_call_provider", failed_provider)

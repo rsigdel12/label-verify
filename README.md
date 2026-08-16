@@ -17,14 +17,14 @@ Deployed application: <https://label-verify-p15v.onrender.com/>
 | Faster application entry | The standard TTB government warning is prefilled and remains editable when an approved record differs |
 | Consistent class/type entry | A common TTB-informed alcohol-type enum supplies form suggestions and backend category matching while still allowing specific designations |
 | Human judgment for near matches | Brand casing/spacing is tolerant; a close but nonidentical regulated class/type is `needs_review` rather than silently approved |
-| Exact warning language and capitalization | Warning comparison preserves case, punctuation, spelling, numbering, and order; visual/OCR whitespace is ignored |
+| Warning text matching | Warning comparison ignores capitalization and visual/OCR whitespace while still checking punctuation, spelling, numbering, and word order |
 | Imperfect photos | Test coverage includes 7-degree skew and simulated glare |
 | Peak-season batch work | Multi-select in the same uploader calls the batch API and shows results per file |
 | Restricted outbound network | Local RapidOCR + ONNX Runtime remains available when a vision API is not configured or cannot be reached |
 | Prototype privacy | Uploads are validated and not retained by the app; Accurate-mode images are sent to the configured provider, and Gemini free-tier content may be used to improve Google's products |
 | Useful error handling | Unsupported, empty, oversized, corrupt, unavailable, timeout, and per-file batch failures return actionable messages |
 
-The app intentionally assists rather than replaces the compliance agent. The warning's wording and capitalization are checked, but OCR text alone cannot prove that the `GOVERNMENT WARNING:` heading is visually bold. The reviewer must confirm styling and any requirements outside the five prototype fields.
+The app intentionally assists rather than replaces the compliance agent. Warning wording is compared without case sensitivity, but OCR text alone cannot prove that the `GOVERNMENT WARNING:` heading is visually uppercase and bold. The reviewer must confirm styling and any requirements outside the five prototype fields.
 
 ### Fixture validity
 
@@ -39,7 +39,7 @@ The generated distilled-spirits fixtures follow the current TTB examples for the
 
 Each request selects its extractor explicitly. **Fast** is the default and keeps the image on the application server for one local OCR pass. **Accurate** sends a 1600-pixel JPEG to a configured vision provider with a strict five-field JSON schema. The recommended prototype provider is `gemini-3.5-flash`, which accepts image input and is available through Gemini's limited free API tier. Existing OpenAI deployments remain supported with `gpt-5.4-mini` through the Responses API. The prompt requires visible transcription rather than filling likely warning text from memory. Gemini gets two 20-second attempts with a short backoff for transient timeouts, HTTP 429 throttling, and server errors. Accurate batches are capped at two concurrent provider calls to reduce free-tier throttling. Successful requests still return immediately, and provider failure does not silently substitute less-accurate OCR.
 
-Fast mode uses RapidOCR locally. Images are normalized with Pillow, limited to 20 megapixels, corrected using phone-camera EXIF orientation, and resized to a 720-pixel bound. The PP-OCRv6 tiny detector is capped at 384 pixels to fit the Render instance. Its shared ONNX sessions are preloaded at application startup so model initialization is not charged to the first Fast request. The internal `auto` compatibility mode can add a targeted contrast-enhanced retry, but it is intentionally not shown in the UI because its latency is less predictable. A system Tesseract installation remains a final development fallback.
+Fast mode uses RapidOCR locally. Images are limited to 20 megapixels and corrected using phone-camera EXIF orientation. A confidence-gated OpenCV pass detects a single likely label, corrects perspective, applies local CLAHE contrast and mild sharpening, and resizes to a 960-pixel bound. Ambiguous multi-panel artwork keeps the complete image so preprocessing cannot discard fields. The PP-OCRv6 tiny detector uses a 512-pixel bound and slightly more recall for small warning and measurement text. Its shared ONNX sessions are preloaded at application startup so model initialization is not charged to the first Fast request. The internal `auto` compatibility mode can add a targeted retry, but it is intentionally not shown in the UI because its latency is less predictable. A system Tesseract installation remains a final development fallback.
 
 RapidOCR and the bundled PP-OCRv6 model assets are used under the Apache-2.0 license.
 
@@ -49,7 +49,7 @@ RapidOCR and the bundled PP-OCRv6 model assets are used under the Apache-2.0 lic
 - Class/type: common spirits, wine, malt-beverage, cider, and sake types are enum-classified. A selected broad type can match its detected subtype; conflicting subtypes fail; uncertain close text requires review.
 - Alcohol content: percent, `ABV`, `Alcohol by Volume`, decimal-comma, and proof formats are normalized, so `40%` and `80 Proof` are equivalent.
 - Net contents: mL, cL, liters, and fluid ounces are normalized; common OCR unit confusions such as `m1` are corrected.
-- Government warning: exact wording passes; whitespace caused by OCR segmentation is ignored; a high-similarity transcription with a verified uppercase heading requires review instead of producing an unreliable approval or false failure.
+- Government warning: matching is case-insensitive; whitespace caused by OCR segmentation is ignored; a high-similarity transcription with a recognizable heading requires review instead of producing an unreliable approval or false failure.
 - Missing application or extraction values require manual review.
 
 ## Run locally
@@ -83,7 +83,7 @@ cd label-verify\backend
 python -m pytest -q
 ```
 
-The suite contains 57 tests, including per-request mode selection, transient Gemini retry, Gemini and OpenAI request schemas, scan-only extraction, provider readiness/failure behavior, and real local OCR through single and batch multipart endpoints. It also covers startup loading, enum classification, alternate ABV and net-content formats, warning uncertainty, validation and error responses, fixture integrity, timing fields, reset behavior, and the frontend/API contract.
+The suite contains 58 tests, including per-request mode selection, transient Gemini retry, Gemini and OpenAI request schemas, scan-only extraction, provider readiness/failure behavior, and real local OCR through single and batch multipart endpoints. It also covers startup loading, enum classification, alternate ABV and net-content formats, common numeric OCR mistakes, warning uncertainty, validation and error responses, fixture integrity, timing fields, reset behavior, and the frontend/API contract.
 
 Run the complete real-OCR fixture evaluation:
 
@@ -91,7 +91,7 @@ Run the complete real-OCR fixture evaluation:
 python tests\run_ocr_extraction.py
 ```
 
-Fast mode completes all eight fixtures in under one second each on the reference development machine. Seven match their intended outcome; the 7-degree skew fixture conservatively returns `needs_review` for one warning word instead of approving an imperfect transcription. Accurate mode is intended for that kind of difficult image. The set also includes a clean match, brand-case variation, incorrect warning case, ABV mismatch, class/type typo requiring review, net-contents mismatch, and glare.
+Fast mode completes all eight fixtures in under two seconds each on the reference development machine and matches every intended outcome, including the 7-degree skew and glare cases. The set also includes a clean match, brand-case variation, case-insensitive warning match, ABV mismatch, class/type typo requiring review, and net-contents mismatch.
 
 ## API
 

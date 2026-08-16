@@ -138,7 +138,7 @@ fixtures = [
                 "GOVERNMENT WARNING:", "Government Warning:"
             )
         },
-        statuses={"warning_statement": "fail"},
+        statuses={"warning_statement": "pass"},
     ),
     fixture(
         "fixture_04_abv_mismatch",
