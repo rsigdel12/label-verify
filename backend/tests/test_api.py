@@ -56,6 +56,20 @@ def test_readiness_reports_bundled_local_ocr():
     assert response.json()["extraction"]["local_ocr_available"] is True
 
 
+def test_readiness_reports_free_gemini_provider(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "configured")
+
+    response = client.get("/ready")
+
+    extraction = response.json()["extraction"]
+    assert extraction["vision_provider_configured"] is True
+    assert extraction["vision_provider"] == "gemini"
+    assert extraction["vision_model"] == "gemini-3.5-flash"
+    assert extraction["available_modes"]["vision"] is True
+
+
 def test_application_startup_preloads_local_ocr(monkeypatch):
     calls = []
 

@@ -8,5 +8,5 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
-      - key: OPENAI_API_KEY
+      - key: GEMINI_API_KEY
         sync: false

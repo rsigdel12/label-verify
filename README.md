@@ -19,7 +19,7 @@ Deployed application: <https://label-verify-p15v.onrender.com/>
 | Imperfect photos | Test coverage includes 7-degree skew and simulated glare |
 | Peak-season batch work | Multi-select in the same uploader calls the batch API and shows results per file |
 | Restricted outbound network | Local RapidOCR + ONNX Runtime remains available when a vision API is not configured or cannot be reached |
-| Prototype privacy | Uploads are validated and not retained by the app; vision-mode images are sent to the configured API provider for processing |
+| Prototype privacy | Uploads are validated and not retained by the app; Accurate-mode images are sent to the configured provider, and Gemini free-tier content may be used to improve Google's products |
 | Useful error handling | Unsupported, empty, oversized, corrupt, unavailable, timeout, and per-file batch failures return actionable messages |
 
 The app intentionally assists rather than replaces the compliance agent. The warning's wording and capitalization are checked, but OCR text alone cannot prove that the `GOVERNMENT WARNING:` heading is visually bold. The reviewer must confirm styling and any requirements outside the five prototype fields.
@@ -35,7 +35,7 @@ The generated distilled-spirits fixtures follow the current TTB examples for the
 - `backend/tests/fixtures/` — eight generated label images with JSON application data and intended results.
 - `frontend/assets/sample-label.png` — self-contained sample used by the live demonstration.
 
-Each request selects its extractor explicitly. **Fast** is the default and keeps the image on the application server for one local OCR pass. **Accurate** sends a 1600-pixel JPEG to `gpt-5.4-mini` through the Responses API with original-detail vision and a strict five-field JSON schema. The prompt requires visible transcription rather than filling likely warning text from memory. The request is not stored by this application and sets `store: false`; the provider attempt has a 15-second total deadline. The two paths are not run sequentially, so a failed Accurate request does not add local OCR time afterward.
+Each request selects its extractor explicitly. **Fast** is the default and keeps the image on the application server for one local OCR pass. **Accurate** sends a 1600-pixel JPEG to a configured vision provider with a strict five-field JSON schema. The recommended prototype provider is `gemini-3.5-flash`, which accepts image input and is available through Gemini's limited free API tier. Existing OpenAI deployments remain supported with `gpt-5.4-mini` through the Responses API. The prompt requires visible transcription rather than filling likely warning text from memory, and the provider attempt has a 15-second total deadline. The two paths are not run sequentially, so a failed Accurate request does not add local OCR time afterward.
 
 Fast mode uses RapidOCR locally. Images are normalized with Pillow, limited to 20 megapixels, corrected using phone-camera EXIF orientation, and resized to a 720-pixel bound. The PP-OCRv6 tiny detector is capped at 384 pixels to fit the Render instance. Its shared ONNX sessions are preloaded at application startup so model initialization is not charged to the first Fast request. The internal `auto` compatibility mode can add a targeted contrast-enhanced retry, but it is intentionally not shown in the UI because its latency is less predictable. A system Tesseract installation remains a final development fallback.
 
@@ -64,15 +64,13 @@ python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 Open <http://127.0.0.1:8000/>. FastAPI serves both the API and frontend, so a separate static-file server is neither needed nor recommended.
 
-No environment variable is required for Fast local OCR. To enable Accurate AI vision in the selector, set:
+No environment variable is required for Fast local OCR. To enable Accurate mode through Gemini's free tier, create a Google AI Studio API key and set:
 
-- `OPENAI_API_KEY`
-- `VISION_BASE_URL` (defaults to `https://api.openai.com/v1`)
-- `VISION_MODEL` (defaults to `gpt-5.4-mini`)
-- `VISION_REASONING_EFFORT` (defaults to `none` for latency)
+- `GEMINI_API_KEY`
+- `GEMINI_MODEL` (defaults to `gemini-3.5-flash`)
 - `EXTRACTION_MODE` (defaults to `local` for older API clients that omit the per-request mode)
 
-The legacy `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL` names remain accepted for compatibility.
+The free tier has lower quotas and Google states that submitted content may be used to improve its products, so it is appropriate for this demonstration but not automatically appropriate for sensitive production records. As an optional paid alternative, set `OPENAI_API_KEY`; `VISION_MODEL` defaults to `gpt-5.4-mini`. The legacy `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL` names remain accepted for compatibility. Set `VISION_PROVIDER=gemini` or `openai` only when both keys are present and an explicit preference is needed.
 
 ## Test and evaluate
 
@@ -83,7 +81,7 @@ cd label-verify\backend
 python -m pytest -q
 ```
 
-The suite contains 52 tests, including per-request mode selection, vision request schema/failure behavior, and real local OCR through both single and batch multipart endpoints. It also covers startup loading, enum classification, alternate ABV and net-content formats, warning uncertainty, validation and error responses, fixture integrity, timing fields, and the frontend/API contract.
+The suite contains 54 tests, including per-request mode selection, Gemini and OpenAI vision request schemas, provider readiness/failure behavior, and real local OCR through both single and batch multipart endpoints. It also covers startup loading, enum classification, alternate ABV and net-content formats, warning uncertainty, validation and error responses, fixture integrity, timing fields, and the frontend/API contract.
 
 Run the complete real-OCR fixture evaluation:
 
@@ -107,7 +105,7 @@ Successful single responses include `filename`, `extracted`, `comparison`, and `
 The included `render.yaml` installs the package and starts the single FastAPI service. RapidOCR model files ship with the installed package, so the deployed app works without `LLM_API_KEY` or a Tesseract system package.
 
 1. Push the latest commit to the repository connected to Render.
-2. Add `OPENAI_API_KEY` as a secret environment variable to enable Accurate mode. `VISION_MODEL=gpt-5.4-mini` is optional because it is the default.
+2. Add a free-tier `GEMINI_API_KEY` as a secret environment variable to enable Accurate mode. `GEMINI_MODEL=gemini-3.5-flash` is optional because it is the default.
 3. Wait for the build to install `rapidocr` and `onnxruntime`.
 4. Confirm `/ready` reports `"status":"ready"`, `"local_ocr_available":true`, and `"vision_provider_configured":true` when the key is present.
 5. Open the home page, choose **Try a working sample**, select a reading mode, then **Verify label**.

@@ -1,5 +1,4 @@
 import asyncio
-import os
 import pathlib
 import shutil
 from contextlib import asynccontextmanager
@@ -8,6 +7,8 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.extraction.vision_client import (
+    configured_vision_model,
+    configured_vision_provider,
     initialize_local_ocr,
     rapidocr_available,
     vision_provider_configured,
@@ -42,13 +43,12 @@ async def readiness_check() -> dict:
         "extraction": {
             "local_ocr_available": local_ocr_available,
             "vision_provider_configured": provider_configured,
+            "vision_provider": configured_vision_provider(),
             "available_modes": {
                 "local": local_ocr_available or tesseract_available,
                 "vision": provider_configured,
             },
-            "vision_model": os.getenv(
-                "VISION_MODEL", os.getenv("LLM_MODEL", "gpt-5.4-mini")
-            ),
+            "vision_model": configured_vision_model(),
             "tesseract_available": tesseract_available,
         },
     }

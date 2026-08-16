@@ -197,6 +197,7 @@ def test_vision_mode_fails_fast_instead_of_running_slow_local_fallback(monkeypat
 
 
 def test_accurate_mode_requires_a_configured_provider(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
 
@@ -248,6 +249,7 @@ def test_provider_request_parses_structured_label(monkeypatch):
         return json.dumps(value)
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setenv("VISION_BASE_URL", "https://provider.example/v1/")
     monkeypatch.setenv("VISION_MODEL", "vision-test-model")
     monkeypatch.setattr(vision_client.httpx, "AsyncClient", FakeClient)
@@ -264,3 +266,66 @@ def test_provider_request_parses_structured_label(monkeypatch):
     assert captured["payload"]["text"]["format"]["strict"] is True
     assert captured["payload"]["reasoning"] == {"effort": "none"}
     assert captured["headers"]["Authorization"] == "Bearer test-key"
+
+
+def test_free_gemini_provider_sends_image_and_parses_schema(monkeypatch):
+    extracted = {
+        "brand_name": "Acme Spirits",
+        "class_type": "Vodka",
+        "alcohol_content": "40% Alc. by Vol.",
+        "net_contents": "750 mL",
+        "warning_statement": "GOVERNMENT WARNING: Exact warning.",
+    }
+    captured = {}
+    serialized = json.dumps(extracted)
+
+    class FakeClient:
+        def __init__(self, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, json, headers):
+            captured.update(url=url, payload=json, headers=headers)
+            request = httpx.Request("POST", url)
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [{"text": serialized}]
+                            }
+                        }
+                    ]
+                },
+                request=request,
+            )
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "free-test-key")
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://gemini.example/v1beta/")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-test-model")
+    monkeypatch.setattr(vision_client.httpx, "AsyncClient", FakeClient)
+
+    result = asyncio.run(vision_client._call_provider(b"jpeg-bytes"))
+
+    assert result.model_dump() == extracted
+    assert captured["timeout"] == vision_client.ACCURATE_TIMEOUT_SECONDS
+    assert captured["url"] == (
+        "https://gemini.example/v1beta/models/gemini-test-model:generateContent"
+    )
+    assert captured["headers"]["x-goog-api-key"] == "free-test-key"
+    assert captured["payload"]["contents"][0]["parts"][1]["inlineData"] == {
+        "mimeType": "image/jpeg",
+        "data": "anBlZy1ieXRlcw==",
+    }
+    config = captured["payload"]["generationConfig"]
+    assert config["responseMimeType"] == "application/json"
+    assert config["responseJsonSchema"] == vision_client.LABEL_JSON_SCHEMA
+    assert config["thinkingConfig"] == {"thinkingLevel": "LOW"}

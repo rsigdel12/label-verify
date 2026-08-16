@@ -25,6 +25,30 @@ OCR_DETECTION_MAX_SIDE = 384
 VISION_IMAGE_MAX_SIDE = 1600
 AUTO_PROVIDER_TIMEOUT_SECONDS = 3.5
 ACCURATE_TIMEOUT_SECONDS = 15.0
+LABEL_FIELDS = (
+    "brand_name",
+    "class_type",
+    "alcohol_content",
+    "net_contents",
+    "warning_statement",
+)
+LABEL_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {field: {"type": ["string", "null"]} for field in LABEL_FIELDS},
+    "required": list(LABEL_FIELDS),
+    "additionalProperties": False,
+}
+VISION_PROMPT = (
+    "Read this alcohol beverage label as a compliance transcription task. Extract only "
+    "text that is visibly supported by the image; never fill in likely or standard text "
+    "from memory. brand_name is the printed brand, not a slogan. class_type is the exact "
+    "printed beverage designation (for example Bourbon Whiskey, Vodka, Red Wine, Ale). "
+    "alcohol_content must include the visible ABV/Alcohol by Volume and proof when shown. "
+    "net_contents must include the number and unit. For warning_statement, transcribe the "
+    "entire visible statement exactly, preserving capitalization, punctuation, numbering, "
+    "and word order while joining visual line wraps with one space. Use null whenever a "
+    "field is absent or not legible enough to transcribe confidently."
+)
 LOCAL_MODEL_DIR = Path(__file__).resolve().parent / "models"
 LOCAL_DETECTION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_det_tiny.onnx"
 LOCAL_RECOGNITION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_rec_tiny.onnx"
@@ -33,8 +57,34 @@ _rapidocr_init_lock = threading.Lock()
 _rapidocr_inference_lock = threading.Lock()
 
 
+def configured_vision_provider() -> str | None:
+    preferred = os.getenv("VISION_PROVIDER", "").strip().lower()
+    providers = {
+        "gemini": bool(os.getenv("GEMINI_API_KEY")),
+        "openai": bool(os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")),
+    }
+    if preferred in providers and providers[preferred]:
+        return preferred
+    # Preserve existing OpenAI deployments. A deployment with only the free
+    # Gemini key automatically selects Gemini without another setting.
+    if providers["openai"]:
+        return "openai"
+    if providers["gemini"]:
+        return "gemini"
+    return None
+
+
 def vision_provider_configured() -> bool:
-    return bool(os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY"))
+    return configured_vision_provider() is not None
+
+
+def configured_vision_model() -> str | None:
+    provider = configured_vision_provider()
+    if provider == "gemini":
+        return os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+    if provider == "openai":
+        return os.getenv("VISION_MODEL", os.getenv("LLM_MODEL", "gpt-5.4-mini"))
+    return None
 
 
 def _normalize_image(
@@ -354,7 +404,26 @@ def _extract_from_text(text: str, line_heights: list[float] | None = None) -> di
     }
 
 
-async def _call_provider(
+def _label_from_json(content: object) -> Optional[ExtractedLabel]:
+    try:
+        if isinstance(content, str):
+            parsed = json.loads(content)
+        elif isinstance(content, dict):
+            parsed = content
+        else:
+            parsed = json.loads(str(content))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        logger.warning("Vision provider returned malformed JSON.")
+        return None
+
+    normalized = {
+        field: None if parsed.get(field) is None else str(parsed[field])
+        for field in LABEL_FIELDS
+    }
+    return ExtractedLabel(**normalized)
+
+
+async def _call_openai_provider(
     image_bytes: bytes, timeout_seconds: float = ACCURATE_TIMEOUT_SECONDS
 ) -> Optional[ExtractedLabel]:
     api_key = os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")
@@ -369,25 +438,13 @@ async def _call_provider(
     encoded_image = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:image/jpeg;base64,{encoded_image}"
 
-    prompt = (
-        "Read this alcohol beverage label as a compliance transcription task. Extract only "
-        "text that is visibly supported by the image; never fill in likely or standard text "
-        "from memory. brand_name is the printed brand, not a slogan. class_type is the exact "
-        "printed beverage designation (for example Bourbon Whiskey, Vodka, Red Wine, Ale). "
-        "alcohol_content must include the visible ABV/Alcohol by Volume and proof when shown. "
-        "net_contents must include the number and unit. For warning_statement, transcribe the "
-        "entire visible statement exactly, preserving capitalization, punctuation, numbering, "
-        "and word order while joining visual line wraps with one space. Use null whenever a "
-        "field is absent or not legible enough to transcribe confidently."
-    )
-
     payload = {
         "model": model,
         "input": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": prompt},
+                    {"type": "input_text", "text": VISION_PROMPT},
                     {
                         "type": "input_image",
                         "image_url": data_url,
@@ -401,27 +458,7 @@ async def _call_provider(
                 "type": "json_schema",
                 "name": "alcohol_label_extraction",
                 "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        field: {"type": ["string", "null"]}
-                        for field in (
-                            "brand_name",
-                            "class_type",
-                            "alcohol_content",
-                            "net_contents",
-                            "warning_statement",
-                        )
-                    },
-                    "required": [
-                        "brand_name",
-                        "class_type",
-                        "alcohol_content",
-                        "net_contents",
-                        "warning_statement",
-                    ],
-                    "additionalProperties": False,
-                },
+                "schema": LABEL_JSON_SCHEMA,
             }
         },
         "reasoning": {"effort": os.getenv("VISION_REASONING_EFFORT", "none")},
@@ -465,29 +502,75 @@ async def _call_provider(
     if not content:
         return None
 
-    try:
-        if isinstance(content, str):
-            parsed = json.loads(content)
-        elif isinstance(content, dict):
-            parsed = content
-        else:
-            parsed = json.loads(str(content))
-    except (TypeError, ValueError, json.JSONDecodeError):
-        logger.warning("Vision provider returned malformed JSON.")
+    return _label_from_json(content)
+
+
+async def _call_gemini_provider(
+    image_bytes: bytes, timeout_seconds: float = ACCURATE_TIMEOUT_SECONDS
+) -> Optional[ExtractedLabel]:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
         return None
 
-    normalized = {
-        field: None if parsed.get(field) is None else str(parsed[field])
-        for field in (
-            "brand_name",
-            "class_type",
-            "alcohol_content",
-            "net_contents",
-            "warning_statement",
-        )
+    base_url = os.getenv(
+        "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
+    )
+    model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+    encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": VISION_PROMPT},
+                    {
+                        "inlineData": {
+                            "mimeType": "image/jpeg",
+                            "data": encoded_image,
+                        }
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": LABEL_JSON_SCHEMA,
+            "thinkingConfig": {"thinkingLevel": "LOW"},
+            "maxOutputTokens": 1200,
+        },
     }
+    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
 
-    return ExtractedLabel(**normalized)
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                response = await client.post(
+                    f"{base_url.rstrip('/')}/models/{model}:generateContent",
+                    json=payload,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+    except (httpx.HTTPError, TimeoutError, ValueError, KeyError) as exc:
+        logger.warning("Gemini vision request failed: %s", type(exc).__name__)
+        return None
+
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        content = "".join(part.get("text", "") for part in parts)
+    except (IndexError, KeyError, TypeError):
+        return None
+    return _label_from_json(content) if content else None
+
+
+async def _call_provider(
+    image_bytes: bytes, timeout_seconds: float = ACCURATE_TIMEOUT_SECONDS
+) -> Optional[ExtractedLabel]:
+    provider = configured_vision_provider()
+    if provider == "gemini":
+        return await _call_gemini_provider(image_bytes, timeout_seconds)
+    if provider == "openai":
+        return await _call_openai_provider(image_bytes, timeout_seconds)
+    return None
 
 
 def rapidocr_available() -> bool:
@@ -616,7 +699,7 @@ async def extract_label_fields(
     if mode == "vision" and not vision_provider_configured():
         raise ExtractionUnavailableError(
             "Accurate AI vision is not configured. Choose Fast read or configure "
-            "OPENAI_API_KEY on the server."
+            "GEMINI_API_KEY (free tier) or OPENAI_API_KEY on the server."
         )
 
     use_vision = mode in {"vision", "auto"} and vision_provider_configured()
@@ -681,14 +764,15 @@ async def extract_label_fields(
         import pytesseract
     except ImportError as exc:
         raise ExtractionUnavailableError(
-            "Image extraction is unavailable. Configure OPENAI_API_KEY, install "
+            "Image extraction is unavailable. Configure GEMINI_API_KEY or "
+            "OPENAI_API_KEY, install "
             "RapidOCR, or install Tesseract OCR."
         ) from exc
 
     if shutil.which("tesseract") is None:
         raise ExtractionUnavailableError(
-            "Image extraction is unavailable. Configure a working OPENAI_API_KEY, "
-            "install RapidOCR, or install the Tesseract system binary."
+            "Image extraction is unavailable. Configure a working GEMINI_API_KEY or "
+            "OPENAI_API_KEY, install RapidOCR, or install the Tesseract system binary."
         )
 
     img = Image.open(BytesIO(normalized_image))
