@@ -150,6 +150,65 @@ def test_lower_detail_pass_can_replace_unreliable_full_view_measurements():
     assert merged["net_contents"] == "750mL"
 
 
+def test_small_label_details_use_stronger_recognizer_for_warning(monkeypatch):
+    class Result:
+        def __init__(self, text):
+            self.txts = (text,)
+            self.scores = (0.95,)
+
+    class MeasurementEngine:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, *_args, **_kwargs):
+            self.calls += 1
+            return Result("750ml 40% alc./vol.")
+
+    class WarningEngine:
+        heading_calls = 6
+
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, *_args, **_kwargs):
+            responses = (
+                "",
+                "",
+                "",
+                "GOVERNMENT WARNING: (1) ACCORDING TO THE SURGEON GENERAL",
+                "",
+                "",
+                "WOMEN SHOULD NOT DRINK ALCOHOLIC BEVERAGES DURING PREGNANCY",
+                "BECAUSE OF THE RISK OF BIRTH DEFECTS. (2) CONSUMPTION",
+                "OF ALCOHOLIC BEVERAGES IMPAIRS YOUR ABILITY TO DRIVE",
+                "OR OPERATE MACHINERY, AND MAY CAUSE HEALTH PROBLEMS.",
+            )
+            text = responses[self.calls]
+            self.calls += 1
+            return Result(text)
+
+    measurement_engine = MeasurementEngine()
+    warning_engine = WarningEngine()
+    monkeypatch.setattr(
+        vision_client, "_get_rapidocr_engine", lambda: measurement_engine
+    )
+    monkeypatch.setattr(
+        vision_client, "_get_rapidocr_detail_engine", lambda: warning_engine
+    )
+    image = Image.new("RGB", (295, 640), "black")
+    encoded = BytesIO()
+    image.save(encoded, format="PNG")
+
+    fields = vision_client._run_small_label_details(encoded.getvalue())
+
+    assert fields["alcohol_content"] == "40% alc./vol."
+    assert fields["net_contents"] == "750ml"
+    assert fields["warning_statement"].startswith("GOVERNMENT WARNING:")
+    assert "HEALTH PROBLEMS" in fields["warning_statement"]
+    assert measurement_engine.calls > 0
+    assert warning_engine.calls == WarningEngine.heading_calls + 4
+
+
 def test_ocr_parser_rejects_unrelated_text_as_warning():
     parsed = vision_client._extract_from_text(
         "Brand\nSCOTCH WHISKY\nAccording to the Surgeon General\n"

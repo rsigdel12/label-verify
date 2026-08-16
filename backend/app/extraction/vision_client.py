@@ -58,7 +58,9 @@ VISION_PROMPT = (
 LOCAL_MODEL_DIR = Path(__file__).resolve().parent / "models"
 LOCAL_DETECTION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_det_tiny.onnx"
 LOCAL_RECOGNITION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_rec_tiny.onnx"
+LOCAL_DETAIL_RECOGNITION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_rec_small.onnx"
 _rapidocr_engine = None
+_rapidocr_detail_engine = None
 _rapidocr_init_lock = threading.Lock()
 _rapidocr_inference_lock = threading.Lock()
 
@@ -944,40 +946,61 @@ def rapidocr_available() -> bool:
     return LOCAL_DETECTION_MODEL.is_file() and LOCAL_RECOGNITION_MODEL.is_file()
 
 
+def _create_rapidocr_engine(recognition_model: Path):
+    from rapidocr import RapidOCR
+
+    return RapidOCR(
+        params={
+            "Global.max_side_len": OCR_IMAGE_MAX_SIDE,
+            "Global.use_cls": False,
+            "Global.text_score": 0.4,
+            "Global.log_level": "warning",
+            "Det.limit_side_len": OCR_DETECTION_MAX_SIDE,
+            "Det.limit_type": "max",
+            "Det.thresh": 0.25,
+            "Det.box_thresh": 0.4,
+            "Det.max_candidates": 1000,
+            "Det.unclip_ratio": 1.7,
+            "Det.model_path": str(LOCAL_DETECTION_MODEL),
+            "Rec.model_path": str(recognition_model),
+            # ONNX Runtime otherwise creates a thread per detected CPU,
+            # increasing memory sharply on constrained hosts.
+            "EngineConfig.onnxruntime.intra_op_num_threads": 2,
+            "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+        }
+    )
+
+
 def _get_rapidocr_engine():
     global _rapidocr_engine
     if _rapidocr_engine is None:
         with _rapidocr_init_lock:
             if _rapidocr_engine is None:
-                from rapidocr import RapidOCR
-
-                _rapidocr_engine = RapidOCR(
-                    params={
-                        "Global.max_side_len": OCR_IMAGE_MAX_SIDE,
-                        "Global.use_cls": False,
-                        "Global.text_score": 0.4,
-                        "Global.log_level": "warning",
-                        "Det.limit_side_len": OCR_DETECTION_MAX_SIDE,
-                        "Det.limit_type": "max",
-                        "Det.thresh": 0.25,
-                        "Det.box_thresh": 0.4,
-                        "Det.max_candidates": 1000,
-                        "Det.unclip_ratio": 1.7,
-                        "Det.model_path": str(LOCAL_DETECTION_MODEL),
-                        "Rec.model_path": str(LOCAL_RECOGNITION_MODEL),
-                        # ONNX Runtime otherwise creates a thread per detected
-                        # CPU, increasing memory sharply on constrained hosts.
-                        "EngineConfig.onnxruntime.intra_op_num_threads": 2,
-                        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
-                    }
-                )
+                _rapidocr_engine = _create_rapidocr_engine(LOCAL_RECOGNITION_MODEL)
     return _rapidocr_engine
+
+
+def _get_rapidocr_detail_engine():
+    """Return the stronger PaddleOCR recognizer used only for tiny legal text."""
+    global _rapidocr_detail_engine
+    if _rapidocr_detail_engine is None:
+        with _rapidocr_init_lock:
+            if _rapidocr_detail_engine is None:
+                recognition_model = (
+                    LOCAL_DETAIL_RECOGNITION_MODEL
+                    if LOCAL_DETAIL_RECOGNITION_MODEL.is_file()
+                    else LOCAL_RECOGNITION_MODEL
+                )
+                _rapidocr_detail_engine = _create_rapidocr_engine(recognition_model)
+    return _rapidocr_detail_engine
 
 
 def initialize_local_ocr() -> None:
     """Load local model sessions during application startup."""
     if rapidocr_available():
         _get_rapidocr_engine()
+        if LOCAL_DETAIL_RECOGNITION_MODEL.is_file():
+            _get_rapidocr_detail_engine()
 
 
 def _run_rapidocr(image_bytes: bytes) -> dict:
@@ -1008,9 +1031,13 @@ def _run_small_label_details(image_bytes: bytes) -> dict:
     image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     height, width = image.shape[:2]
     left, right = round(width * 0.16), round(width * 0.84)
-    engine = _get_rapidocr_engine()
+    measurement_engine = _get_rapidocr_engine()
+    # PP-OCRv6-small is substantially better on five-pixel warning text, but
+    # using it on the full label costs too much latency. Reserve it for the
+    # handful of lower-label strips and keep the tiny model for measurements.
+    warning_engine = _get_rapidocr_detail_engine()
 
-    def recognize(y: int, strip_height: int) -> tuple[str, float]:
+    def recognize(engine, y: int, strip_height: int) -> tuple[str, float]:
         crop = image[max(0, y) : min(height, y + strip_height), left:right]
         if crop.size == 0:
             return "", 0.0
@@ -1038,7 +1065,7 @@ def _run_small_label_details(image_bytes: bytes) -> dict:
             round(height * 0.80) + 1,
             measurement_step,
         ):
-            text, confidence = recognize(y, measurement_height)
+            text, confidence = recognize(measurement_engine, y, measurement_height)
             parsed = _extract_from_text(text)
             if parsed.get("alcohol_content") or parsed.get("net_contents"):
                 measurements.append(
@@ -1068,7 +1095,7 @@ def _run_small_label_details(image_bytes: bytes) -> dict:
             round(height * 0.69) + 1,
             warning_step,
         ):
-            text, confidence = recognize(y, warning_height)
+            text, confidence = recognize(warning_engine, y, warning_height)
             if len(text) < 12:
                 continue
             heading_score = sum(
@@ -1106,7 +1133,7 @@ def _run_small_label_details(image_bytes: bytes) -> dict:
                 line_pitch = max(7, round(height * 0.014))
                 for index, anchor in enumerate(clause_anchors):
                     y = heading_y + first_clause_offset + index * line_pitch
-                    text, _ = recognize(y, warning_height)
+                    text, _ = recognize(warning_engine, y, warning_height)
                     similarity = fuzz.partial_ratio(anchor, text.casefold())
                     if similarity >= 40 and text:
                         warning_lines.append(text)
