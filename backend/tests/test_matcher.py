@@ -174,3 +174,26 @@ def test_near_complete_warning_requires_review_instead_of_false_failure():
 
     assert result["status"] == "needs_review"
     assert result["heading_verified"] is True
+
+
+def test_noisy_small_print_warning_requires_review_when_heading_is_verified():
+    expected = (
+        "GOVERNMENT WARNING: (1) According to the Surgeon General, women should "
+        "not drink alcoholic beverages during pregnancy because of the risk of "
+        "birth defects. (2) Consumption of alcoholic beverages impairs your ability "
+        "to drive a car or operate machinery, and may cause health problems."
+    )
+    actual = (
+        "GOVERNMENT WARNING: (I ACCOROINETO THE SURGEONENENE NY STOULD NOT DRINK "
+        "ALCOHIUC BEVERAGES DUSINPTON UF ATOAUSE OF THE RISK OF BRTH DEFECTS "
+        "(2) CONSIE ACIR DR CPERIUIC BEVERAGES IMPARS YOUR ABUTY TO DAFRLENS "
+        "LPERATE MADHINERY AND MAY CAUSE HEALTR PRUSLE"
+    )
+
+    result = compare_fields(
+        ExtractedLabel(warning_statement=actual),
+        {"warning_statement": expected},
+    )["warning_statement"]
+
+    assert result["status"] == "needs_review"
+    assert result["heading_verified"] is True

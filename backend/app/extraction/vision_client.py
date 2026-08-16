@@ -468,11 +468,14 @@ def _normalize_numeric_ocr(line: str) -> str:
         # fixes 75O, 4O, and I2 without changing words or measurement units.
         return token.translate(substitutions) if re.search(r"\d", token) else token
 
-    return re.sub(
+    normalized = re.sub(
         r"(?<![A-Za-z])[0-9OoIiSsB]+(?:[.,][0-9OoIiSsB]+)?",
         normalize_token,
         line,
     )
+    # OCR may join adjacent declarations as "750ml40%". Restore only the
+    # unambiguous boundary between a metric volume unit and the next number.
+    return re.sub(r"(?i)(m[l1])(?=\d)", r"\1 ", normalized)
 
 
 def _looks_like_alcohol_line(line: str) -> bool:
@@ -490,6 +493,12 @@ def _extract_alcohol_content(lines: list[str]) -> tuple[str | None, int | None]:
         for index in range(len(lines) - window_size + 1):
             combined = _normalize_numeric_ocr(
                 " ".join(lines[index : index + window_size])
+            )
+            combined = re.sub(
+                r"\balc\s*/\s*vol\.?",
+                "alc./vol.",
+                combined,
+                flags=re.IGNORECASE,
             )
             if _looks_like_alcohol_line(combined):
                 leading_measurement = NET_CONTENTS_VALUE.match(combined)
@@ -975,7 +984,9 @@ def _run_rapidocr(image_bytes: bytes) -> dict:
     """Run the shared ONNX OCR session safely outside the async event loop."""
     engine = _get_rapidocr_engine()
     with _rapidocr_inference_lock:
-        result = engine(image_bytes, use_cls=False)
+        # Pass every mode explicitly. RapidOCR retains a recognition-only mode
+        # after line-strip calls unless detection is turned back on here.
+        result = engine(image_bytes, use_det=True, use_cls=False, use_rec=True)
     texts = tuple(result.txts or ())
     boxes = tuple(result.boxes) if result.boxes is not None else ()
     heights = [
@@ -986,6 +997,127 @@ def _run_rapidocr(image_bytes: bytes) -> dict:
         "\n".join(texts),
         heights if len(heights) == len(texts) else None,
     )
+
+
+def _run_small_label_details(image_bytes: bytes) -> dict:
+    """Read tiny lower-label declarations as lines without another detection pass."""
+    import cv2
+    import numpy as np
+
+    rgb = np.asarray(_load_rgb_image(image_bytes))
+    image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    height, width = image.shape[:2]
+    left, right = round(width * 0.16), round(width * 0.84)
+    engine = _get_rapidocr_engine()
+
+    def recognize(y: int, strip_height: int) -> tuple[str, float]:
+        crop = image[max(0, y) : min(height, y + strip_height), left:right]
+        if crop.size == 0:
+            return "", 0.0
+        result = engine(crop, use_det=False, use_cls=False, use_rec=True)
+        text = (result.txts or ("",))[0]
+        score = float((result.scores or (0.0,))[0])
+        return text.strip(), score
+
+    fields = {
+        "brand_name": None,
+        "class_type": None,
+        "alcohol_content": None,
+        "net_contents": None,
+        "warning_statement": None,
+    }
+    with _rapidocr_inference_lock:
+        # ABV and net contents usually share one comparatively large line just
+        # below the warning. Recognition-only strips avoid a costly detector
+        # pass and preserve the leading digit that the full view often loses.
+        measurement_height = max(12, round(height * 0.025))
+        measurement_step = max(3, round(height * 0.006))
+        measurements = []
+        for y in range(
+            round(height * 0.70),
+            round(height * 0.80) + 1,
+            measurement_step,
+        ):
+            text, confidence = recognize(y, measurement_height)
+            parsed = _extract_from_text(text)
+            if parsed.get("alcohol_content") or parsed.get("net_contents"):
+                measurements.append(
+                    (
+                        int(
+                            bool(parsed.get("alcohol_content"))
+                            and bool(parsed.get("net_contents"))
+                        ),
+                        int(_alcohol_is_plausible(parsed.get("alcohol_content"))),
+                        confidence,
+                        parsed,
+                    )
+                )
+        if measurements:
+            best_measurement = max(measurements, key=lambda item: item[:3])[3]
+            fields["alcohol_content"] = best_measurement.get("alcohol_content")
+            fields["net_contents"] = best_measurement.get("net_contents")
+
+        # Locate the statutory heading, then read each successive printed line.
+        # Expected anchors validate the segmentation; they never replace the
+        # body text actually recognized from the image.
+        warning_height = max(10, round(height * 0.019))
+        warning_step = max(6, round(height * 0.015))
+        heading_candidates = []
+        for y in range(
+            round(height * 0.60),
+            round(height * 0.69) + 1,
+            warning_step,
+        ):
+            text, confidence = recognize(y, warning_height)
+            if len(text) < 12:
+                continue
+            heading_score = sum(
+                fuzz.partial_ratio(anchor, text.casefold())
+                for anchor in ("government", "warning", "surgeon general")
+            ) / 3
+            heading_candidates.append((heading_score, confidence, y, text))
+
+        if heading_candidates:
+            heading_score, _, heading_y, heading_text = max(heading_candidates)
+            if heading_score >= 65:
+                enumeration = re.search(r"\([1Ii]\)?", heading_text)
+                if enumeration:
+                    heading_text = (
+                        "GOVERNMENT WARNING: " + heading_text[enumeration.start() :]
+                    )
+                else:
+                    parts = heading_text.split()
+                    body_start = 1
+                    if len(parts) > 1 and fuzz.ratio(
+                        "warning", parts[1].casefold()
+                    ) >= 75:
+                        body_start = 2
+                    heading_text = "GOVERNMENT WARNING: " + " ".join(
+                        parts[body_start:]
+                    )
+                clause_anchors = (
+                    "should not drink alcoholic beverages during pregnancy",
+                    "because risk birth defects consumption",
+                    "alcoholic beverages impairs your ability to drive",
+                    "operate machinery may cause health problems",
+                )
+                warning_lines = [heading_text]
+                first_clause_offset = max(9, round(height * 0.019))
+                line_pitch = max(7, round(height * 0.014))
+                for index, anchor in enumerate(clause_anchors):
+                    y = heading_y + first_clause_offset + index * line_pitch
+                    text, _ = recognize(y, warning_height)
+                    similarity = fuzz.partial_ratio(anchor, text.casefold())
+                    if similarity >= 40 and text:
+                        warning_lines.append(text)
+                warning = " ".join(warning_lines)
+                if (
+                    len(warning_lines) >= 4
+                    and _warning_transcription_score(warning) >= 55
+                ):
+                    fields["warning_statement"] = warning
+
+    return fields
 
 
 def _extraction_quality(fields: dict) -> int:
@@ -1143,10 +1275,18 @@ async def extract_label_fields(
                 small_export = False
             retry_warning = not small_export
             retry_regions = _retry_regions(local_fields, retry_warning)
-            if small_export and "lower" not in retry_regions:
-                # A focused declaration pass is cheap and more reliable than
-                # measurements read from the full view of a tiny export.
-                retry_regions += ("lower",)
+            if small_export:
+                # Recognition-only line strips are both faster and more
+                # accurate than a second full detector pass on tiny exports.
+                retry_regions = tuple(
+                    region for region in retry_regions if region != "lower"
+                )
+                detail_fields = await asyncio.to_thread(
+                    _run_small_label_details, image_bytes
+                )
+                local_fields = _merge_extractions(
+                    local_fields, detail_fields, prefer_measurements=True
+                )
             for region in retry_regions:
                 # Regional views retain more source pixels for small type. A
                 # strict cutoff prevents retries from pushing a slow machine

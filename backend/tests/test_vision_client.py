@@ -116,6 +116,15 @@ def test_ocr_parser_joins_measurements_split_across_three_boxes():
     assert parsed["net_contents"] == "750 mL"
 
 
+def test_ocr_parser_separates_joined_volume_and_normalizes_alc_per_vol():
+    parsed = vision_client._extract_from_text(
+        "GRANGESTONE\nSCOTCH WHISKY\n750ml40% alc/vol."
+    )
+
+    assert parsed["alcohol_content"] == "40% alc./vol."
+    assert parsed["net_contents"] == "750ml"
+
+
 def test_ocr_parser_ignores_non_latin_logo_and_keeps_specific_scotch_type():
     parsed = vision_client._extract_from_text(
         "费\nGRANGESTONE\nHIGHLAND SINGLE MALT\nSCOTCH WHISKY\n"

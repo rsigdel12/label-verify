@@ -188,7 +188,11 @@ def _compare_warning_statement(expected: str | None, actual: str | None) -> dict
     # A near-complete OCR transcription is evidence that the warning is
     # present, but it is not safe to approve exact regulated wording when OCR
     # dropped punctuation or confused a character.
-    status = "needs_review" if similarity >= 90 and heading_verified else "fail"
+    # Tiny local-OCR line strips can establish that all warning clauses are
+    # present while still confusing individual condensed letters. Never pass
+    # that transcription automatically, but route it to a person rather than
+    # declaring the printed warning absent or different.
+    status = "needs_review" if similarity >= 70 and heading_verified else "fail"
     return _comparison(
         status,
         expected,
