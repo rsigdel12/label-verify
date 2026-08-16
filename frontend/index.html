@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Compare alcohol label artwork with approved application details." />
     <title>Label Verify | Alcohol Label Review</title>
-    <link rel="stylesheet" href="./styles.css?v=4" />
+    <link rel="stylesheet" href="./styles.css?v=5" />
   </head>
   <body>
     <a class="skip-link" href="#mainContent">Skip to main content</a>
@@ -39,7 +39,15 @@
             </label>
           </div>
           <div id="filePreview" class="file-preview hidden"><img id="previewImage" alt="Preview of the first selected alcohol label" /><div class="file-details"><strong id="fileName"></strong><span id="fileSize"></span></div><button id="removeFileButton" class="remove-button" type="button">Remove</button></div>
-          <p class="privacy-note">Images are processed in memory and are not stored.</p>
+          <p class="privacy-note">This app does not retain images. When AI vision is enabled, the image is sent to the configured provider for this review.</p>
+          <div class="read-mode">
+            <label for="extractionMode">Reading mode</label>
+            <select id="extractionMode" aria-describedby="modeHelp">
+              <option value="local">Fast — local OCR</option>
+              <option value="vision" disabled>Accurate — AI vision</option>
+            </select>
+            <p id="modeHelp">Fast uses one local OCR pass and targets a result in under five seconds.</p>
+          </div>
         </section>
 
         <section class="workflow-section application-section" aria-labelledby="applicationHeading">
@@ -47,7 +55,7 @@
           <p class="section-help">These are the expected values. For a batch, the same application is compared with every selected image.</p>
           <div class="field-grid">
             <div class="form-field"><label for="brandName">Brand name</label><input id="brandName" name="brand_name" type="text" placeholder="Acme Spirits" autocomplete="off" required /></div>
-            <div class="form-field"><label for="classType">Class or type</label><input id="classType" name="class_type" type="text" placeholder="Kentucky Straight Bourbon Whiskey" autocomplete="off" required /></div>
+            <div class="form-field"><div class="label-row"><label for="classType">Class or type</label><span>Choose a common type or enter a specific designation</span></div><input id="classType" name="class_type" type="text" list="alcoholTypes" placeholder="Kentucky Straight Bourbon Whiskey" autocomplete="off" required /><datalist id="alcoholTypes"><option value="Vodka"></option><option value="Gin"></option><option value="Rum"></option><option value="Tequila"></option><option value="Whiskey"></option><option value="Bourbon Whiskey"></option><option value="Rye Whiskey"></option><option value="Scotch Whisky"></option><option value="Irish Whiskey"></option><option value="Brandy"></option><option value="Cognac"></option><option value="Liqueur or Cordial"></option><option value="Neutral Spirits"></option><option value="Red Wine"></option><option value="White Wine"></option><option value="Rosé Wine"></option><option value="Sparkling Wine"></option><option value="Table Wine"></option><option value="Dessert Wine"></option><option value="Cider"></option><option value="Beer"></option><option value="Lager"></option><option value="Ale"></option><option value="Porter"></option><option value="Stout"></option><option value="Malt Beverage"></option><option value="Sake"></option></datalist></div>
             <div class="form-field"><label for="alcoholContent">Alcohol content</label><input id="alcoholContent" name="alcohol_content" type="text" placeholder="45% Alc. by Vol." autocomplete="off" required /></div>
             <div class="form-field"><label for="netContents">Net contents</label><input id="netContents" name="net_contents" type="text" placeholder="750 mL" autocomplete="off" required /></div>
             <div class="form-field field-wide"><div class="label-row"><label for="warningStatement">Government warning statement</label><span>Standard TTB text is prefilled; edit if needed</span></div><textarea id="warningStatement" name="warning_statement" rows="4" required></textarea></div>
@@ -65,6 +73,6 @@
       </section>
     </main>
     <footer class="site-footer">Label Verify · Standalone proof of concept · No images retained</footer>
-    <script src="./upload.js?v=10"></script>
+    <script src="./upload.js?v=11"></script>
   </body>
 </html>

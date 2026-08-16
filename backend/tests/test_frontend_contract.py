@@ -39,6 +39,8 @@ def test_frontend_exposes_application_inputs_upload_and_timing_results():
         "resultsSection",
         "serverTime",
         "roundTripTime",
+        "extractionMode",
+        "modeHelp",
     } <= parser.ids
 
 
@@ -48,6 +50,7 @@ def test_frontend_submits_user_values_instead_of_a_fixed_verification_payload():
     assert "function applicationPayload()" in script
     assert 'brand_name:byId("brandName").value.trim()' in script
     assert 'requestBody.append("application_data",JSON.stringify(applicationPayload()))' in script
+    assert 'requestBody.append("extraction_mode",extractionMode.value)' in script
     assert "data.processing_time_ms" in script
 
 
@@ -71,3 +74,22 @@ def test_standard_government_warning_is_prefilled_but_editable():
     assert "readonly" not in markup
     assert 'byId("warningStatement").value = STANDARD_WARNING;' in script
     assert "According to the Surgeon General" in script
+
+
+def test_class_type_has_common_enum_suggestions_without_blocking_specific_types():
+    markup = (FRONTEND / "index.html").read_text(encoding="utf-8")
+
+    assert 'list="alcoholTypes"' in markup
+    assert '<datalist id="alcoholTypes">' in markup
+    for value in ("Vodka", "Bourbon Whiskey", "Red Wine", "Lager", "Sake"):
+        assert f'<option value="{value}">' in markup
+
+
+def test_frontend_offers_fast_and_accurate_read_modes():
+    markup = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    script = (FRONTEND / "upload.js").read_text(encoding="utf-8")
+
+    assert '<option value="local">Fast' in markup
+    assert '<option value="vision" disabled>Accurate' in markup
+    assert "vision_provider_configured" in script
+    assert "Accurate AI vision may take 5–15 seconds." in script

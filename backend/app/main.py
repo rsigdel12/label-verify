@@ -7,14 +7,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.extraction.vision_client import initialize_local_ocr, rapidocr_available
+from app.extraction.vision_client import (
+    initialize_local_ocr,
+    rapidocr_available,
+    vision_provider_configured,
+)
 from app.routes.batch import router as batch_router
 from app.routes.verify import router as verify_router
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Load the ONNX sessions before Render marks the service ready. This keeps
-    # model initialization out of the first reviewer's processing time.
+    # Fast mode is always available in the UI, so warm its shared ONNX sessions
+    # before requests arrive rather than charging initialization to the user.
     await asyncio.to_thread(initialize_local_ocr)
     yield
 
@@ -29,7 +33,7 @@ async def health_check() -> dict:
 
 @app.get("/ready")
 async def readiness_check() -> dict:
-    provider_configured = bool(os.getenv("LLM_API_KEY"))
+    provider_configured = vision_provider_configured()
     local_ocr_available = rapidocr_available()
     tesseract_available = shutil.which("tesseract") is not None
     ready = local_ocr_available or provider_configured or tesseract_available
@@ -38,6 +42,13 @@ async def readiness_check() -> dict:
         "extraction": {
             "local_ocr_available": local_ocr_available,
             "vision_provider_configured": provider_configured,
+            "available_modes": {
+                "local": local_ocr_available or tesseract_available,
+                "vision": provider_configured,
+            },
+            "vision_model": os.getenv(
+                "VISION_MODEL", os.getenv("LLM_MODEL", "gpt-5.4-mini")
+            ),
             "tesseract_available": tesseract_available,
         },
     }

@@ -45,6 +45,10 @@ async def main():
         expected = metadata["expected_statuses"]
         outcome = "PASS" if statuses == expected else "FAIL"
         print(f"{outcome:<5}  {p.name:<38} {result['elapsed']:.3f}s")
+        if result["elapsed"] >= 5:
+            failures.append(
+                f"{p.name}: exceeded five-second target ({result['elapsed']:.3f}s)"
+            )
         if statuses != expected:
             failures.append(f"{p.name}: expected {expected}, got {statuses}")
     if failures:

@@ -15,12 +15,16 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps, UnidentifiedImageErr
 from rapidfuzz import fuzz
 
 from app.extraction.errors import ExtractionUnavailableError, InvalidImageError
+from app.extraction.class_types import classify_alcohol_type
 from app.extraction.schema import ExtractedLabel
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_PIXELS = 20_000_000
-OCR_IMAGE_MAX_SIDE = 1280
-OCR_DETECTION_MAX_SIDE = 960
+OCR_IMAGE_MAX_SIDE = 720
+OCR_DETECTION_MAX_SIDE = 384
+VISION_IMAGE_MAX_SIDE = 1600
+AUTO_PROVIDER_TIMEOUT_SECONDS = 3.5
+ACCURATE_TIMEOUT_SECONDS = 15.0
 LOCAL_MODEL_DIR = Path(__file__).resolve().parent / "models"
 LOCAL_DETECTION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_det_tiny.onnx"
 LOCAL_RECOGNITION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_rec_tiny.onnx"
@@ -29,7 +33,15 @@ _rapidocr_init_lock = threading.Lock()
 _rapidocr_inference_lock = threading.Lock()
 
 
-def _normalize_image(image_bytes: bytes) -> bytes:
+def vision_provider_configured() -> bool:
+    return bool(os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY"))
+
+
+def _normalize_image(
+    image_bytes: bytes,
+    max_side: int = OCR_IMAGE_MAX_SIDE,
+    output_format: str = "PNG",
+) -> bytes:
     if not image_bytes:
         raise InvalidImageError("The uploaded image is empty.")
 
@@ -48,9 +60,12 @@ def _normalize_image(image_bytes: bytes) -> bytes:
             # Real bottle photos contain substantially smaller text than the
             # generated fixtures. Keep enough detail for warning text while the
             # detector's separate bound below controls inference memory.
-            image.thumbnail((OCR_IMAGE_MAX_SIDE, OCR_IMAGE_MAX_SIDE))
+            image.thumbnail((max_side, max_side))
             output = BytesIO()
-            image.save(output, format="PNG", optimize=True)
+            if output_format == "JPEG":
+                image.save(output, format="JPEG", quality=90, optimize=True)
+            else:
+                image.save(output, format="PNG", optimize=True)
             return output.getvalue()
     except InvalidImageError:
         raise
@@ -60,9 +75,14 @@ def _normalize_image(image_bytes: bytes) -> bytes:
         ) from exc
 
 
-def _enhance_image(image_bytes: bytes) -> bytes:
-    """Create a high-contrast OCR variant for glare and low-light photos."""
+def _enhance_image(image_bytes: bytes, region: str = "full") -> bytes:
+    """Create a high-contrast, targeted OCR variant without a large tensor."""
     with Image.open(BytesIO(image_bytes)) as image:
+        width, height = image.size
+        if region == "upper":
+            image = image.crop((0, 0, width, max(1, int(height * 0.72))))
+        elif region == "lower":
+            image = image.crop((0, int(height * 0.28), width, height))
         grayscale = ImageOps.grayscale(image)
         grayscale = ImageOps.autocontrast(grayscale, cutoff=1)
         grayscale = ImageEnhance.Contrast(grayscale).enhance(1.25)
@@ -138,6 +158,103 @@ def _is_utility_line(line: str) -> bool:
     )
 
 
+ALCOHOL_HINT = re.compile(
+    r"(?:alc(?:ohol)?|alc[o0]h[o0]l|abv|by\s+vol(?:ume)?|vol\.?|proof)",
+    re.IGNORECASE,
+)
+PERCENT_VALUE = re.compile(
+    r"\b(\d{1,3}(?:[.,]\d+)?)\s*(?:%|percent\b|per\s*cent\b)",
+    re.IGNORECASE,
+)
+PROOF_VALUE = re.compile(r"\b(\d{1,3}(?:[.,]\d+)?)\s*proof\b", re.IGNORECASE)
+NET_CONTENTS_VALUE = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s*(?:"
+    r"m(?:l|1)|rn(?:l|1)|millilit(?:er|re)s?|c(?:l|1)|centilit(?:er|re)s?|"
+    r"l|lit(?:er|re)s?|fl\.?\s*oz\.?|fluid\s+ounces?|oz\.?)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_alcohol_line(line: str) -> bool:
+    return bool(
+        PROOF_VALUE.search(line)
+        or (PERCENT_VALUE.search(line) and ALCOHOL_HINT.search(line))
+    )
+
+
+def _extract_alcohol_content(lines: list[str]) -> tuple[str | None, int | None]:
+    for index, line in enumerate(lines):
+        if _looks_like_alcohol_line(line):
+            return line, index
+
+    # OCR sometimes splits "ALCOHOL" and "40% BY VOLUME" into adjacent boxes.
+    for index in range(len(lines) - 1):
+        combined = f"{lines[index]} {lines[index + 1]}"
+        if _looks_like_alcohol_line(combined):
+            return combined, index
+    return None, None
+
+
+def _extract_net_contents(lines: list[str]) -> str | None:
+    candidates = [line for line in lines if NET_CONTENTS_VALUE.search(line)]
+    if not candidates:
+        return None
+    # Prefer an explicitly labeled declaration over an isolated measurement.
+    selected = max(
+        candidates,
+        key=lambda line: (
+            bool(re.search(r"\bnet\s*(?:contents?|cont\.?)?\b", line, re.IGNORECASE)),
+            -len(line),
+        ),
+    )
+    match = NET_CONTENTS_VALUE.search(selected)
+    return match.group(0) if match else None
+
+
+def _warning_heading_score(line: str) -> float:
+    normalized = " ".join(re.findall(r"[a-z0-9]+", line.casefold()))
+    normalized = normalized.replace("0", "o").replace("1", "i")
+    return float(fuzz.partial_ratio("government warning", normalized))
+
+
+def _extract_warning(lines: list[str]) -> str | None:
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if _warning_heading_score(line) >= 82
+        ),
+        None,
+    )
+    if start is None:
+        # Preserve the body when the small heading alone was unreadable. The
+        # comparison layer will require manual review because the heading could
+        # not be verified.
+        start = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if fuzz.partial_ratio("surgeon general", line.casefold()) >= 88
+            ),
+            None,
+        )
+    if start is None:
+        return None
+
+    warning_lines = []
+    for line in lines[start:]:
+        if warning_lines and re.match(
+            r"^(?:batch|lot|barcode|upc|produced|bottled|imported)\b",
+            line,
+            re.IGNORECASE,
+        ):
+            break
+        warning_lines.append(line)
+        if fuzz.partial_ratio("may cause health problems", line.casefold()) >= 88:
+            break
+    return " ".join(warning_lines)
+
+
 def _looks_like_class_fragment(line: str) -> bool:
     words = set(re.findall(r"[a-z]+", line.lower()))
     known_words = CLASS_DESCRIPTOR_WORDS | set(BEVERAGE_KEYWORDS)
@@ -159,14 +276,13 @@ def _looks_like_class_fragment(line: str) -> bool:
 # first detected line is always the brand.
 def _extract_from_text(text: str, line_heights: list[float] | None = None) -> dict:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    joined = "\n".join(lines)
-
-    alcohol_line = next(
-        (index for index, line in enumerate(lines) if re.search(r"\d(?:\.\d+)?\s*%", line)),
-        None,
-    )
+    alcohol_content, alcohol_line = _extract_alcohol_content(lines)
     warning_line = next(
-        (index for index, line in enumerate(lines) if "warning" in line.lower()),
+        (
+            index
+            for index, line in enumerate(lines)
+            if _warning_heading_score(line) >= 82
+        ),
         None,
     )
     brand_search_end = min(
@@ -205,7 +321,7 @@ def _extract_from_text(text: str, line_heights: list[float] | None = None) -> di
         for index in range(search_end)
         if index != brand_index
         and not _is_utility_line(lines[index])
-        and any(keyword in lines[index].lower() for keyword in BEVERAGE_KEYWORDS)
+        and classify_alcohol_type(lines[index])[0] is not None
     ]
     if designation_indexes:
         start = end = designation_indexes[0]
@@ -229,85 +345,88 @@ def _extract_from_text(text: str, line_heights: list[float] | None = None) -> di
             # declaration, so the last plausible line is safer than line two.
             class_type = fallback_lines[-1]
 
-    # Alcohol content (ABV)
-    abv_match = re.search(
-        r"((?:alc(?:ohol)?\.?\s*)?\d{1,3}(?:\.\d+)?\s*%\s*"
-        r"(?:(?:alc(?:ohol)?\.?\s*)?(?:by\s*)?vol(?:ume)?\.?|alc\.?/?vol\.?)?"
-        r"(?:\s*\(\s*\d+(?:\.\d+)?\s*proof\s*\))?)",
-        joined,
-        re.IGNORECASE,
-    )
-    alcohol_content = abv_match.group(1) if abv_match else None
-
-    # Net contents (ml, L)
-    net_match = re.search(
-        r"(\d+(?:\.\d+)?\s*(?:m[lL]|[lL]|c[lL]))\b",
-        joined,
-        re.IGNORECASE,
-    )
-    net_contents = net_match.group(1) if net_match else None
-
-    # Warning statement: preserve the complete warning, even when OCR wraps it.
-    warning = None
-    standard_warning = re.search(
-        r"(government\s+warning\s*:.*?health\s+problems\.)",
-        " ".join(lines),
-        flags=re.IGNORECASE,
-    )
-    if standard_warning:
-        warning = standard_warning.group(1)
-    else:
-        for index, ln in enumerate(lines):
-            if "warning" in ln.lower():
-                warning_lines = []
-                for warning_line in lines[index:]:
-                    if re.match(r"^(?:batch|lot|barcode)\b", warning_line, re.IGNORECASE):
-                        break
-                    warning_lines.append(warning_line)
-                warning = " ".join(warning_lines)
-                break
-
     return {
         "brand_name": brand,
         "class_type": class_type,
         "alcohol_content": alcohol_content,
-        "net_contents": net_contents,
-        "warning_statement": warning,
+        "net_contents": _extract_net_contents(lines),
+        "warning_statement": _extract_warning(lines),
     }
 
 
-async def _call_provider(image_bytes: bytes) -> Optional[ExtractedLabel]:
-    api_key = os.getenv("LLM_API_KEY")
+async def _call_provider(
+    image_bytes: bytes, timeout_seconds: float = ACCURATE_TIMEOUT_SECONDS
+) -> Optional[ExtractedLabel]:
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")
     if not api_key:
         return None
 
-    base_url = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+    base_url = os.getenv(
+        "VISION_BASE_URL",
+        os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
+    )
+    model = os.getenv("VISION_MODEL", os.getenv("LLM_MODEL", "gpt-5.4-mini"))
     encoded_image = base64.b64encode(image_bytes).decode("utf-8")
-    data_url = f"data:image/png;base64,{encoded_image}"
+    data_url = f"data:image/jpeg;base64,{encoded_image}"
 
     prompt = (
-        "Extract the following fields from this alcohol label and return valid JSON only. "
-        "The JSON object must include exactly these keys with string values: "
-        "brand_name, class_type, alcohol_content, net_contents, warning_statement. "
-        "For warning_statement, transcribe the complete statement exactly, preserving "
-        "capitalization, punctuation, and numbering while joining visual line wraps with "
-        "single spaces. If a field is not visible, use null. Do not include extra keys."
+        "Read this alcohol beverage label as a compliance transcription task. Extract only "
+        "text that is visibly supported by the image; never fill in likely or standard text "
+        "from memory. brand_name is the printed brand, not a slogan. class_type is the exact "
+        "printed beverage designation (for example Bourbon Whiskey, Vodka, Red Wine, Ale). "
+        "alcohol_content must include the visible ABV/Alcohol by Volume and proof when shown. "
+        "net_contents must include the number and unit. For warning_statement, transcribe the "
+        "entire visible statement exactly, preserving capitalization, punctuation, numbering, "
+        "and word order while joining visual line wraps with one space. Use null whenever a "
+        "field is absent or not legible enough to transcribe confidently."
     )
 
     payload = {
         "model": model,
-        "messages": [
+        "input": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "input_text", "text": prompt},
+                    {
+                        "type": "input_image",
+                        "image_url": data_url,
+                        "detail": "original",
+                    },
                 ],
             }
         ],
-        "response_format": {"type": "json_object"},
-        "temperature": 0,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "alcohol_label_extraction",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        field: {"type": ["string", "null"]}
+                        for field in (
+                            "brand_name",
+                            "class_type",
+                            "alcohol_content",
+                            "net_contents",
+                            "warning_statement",
+                        )
+                    },
+                    "required": [
+                        "brand_name",
+                        "class_type",
+                        "alcohol_content",
+                        "net_contents",
+                        "warning_statement",
+                    ],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "reasoning": {"effort": os.getenv("VISION_REASONING_EFFORT", "none")},
+        "max_output_tokens": 600,
+        "store": False,
     }
 
     headers = {
@@ -316,19 +435,33 @@ async def _call_provider(image_bytes: bytes) -> Optional[ExtractedLabel]:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(
-                f"{base_url.rstrip('/')}/chat/completions",
-                json=payload,
-                headers=headers,
-            )
-            response.raise_for_status()
-            data = response.json()
-    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        # httpx timeouts apply per network phase; the outer deadline bounds the
+        # entire provider attempt so connect + upload + response cannot exceed
+        # the latency budget together.
+        async with asyncio.timeout(timeout_seconds):
+            async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                response = await client.post(
+                    f"{base_url.rstrip('/')}/responses",
+                    json=payload,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+    except (httpx.HTTPError, TimeoutError, ValueError, KeyError) as exc:
         logger.warning("Vision provider request failed: %s", type(exc).__name__)
         return None
 
-    content = data.get("choices", [{}])[0].get("message", {}).get("content")
+    content = data.get("output_text")
+    if not content:
+        for output_item in data.get("output", []):
+            if output_item.get("type") != "message":
+                continue
+            for content_item in output_item.get("content", []):
+                if content_item.get("type") == "output_text":
+                    content = content_item.get("text")
+                    break
+            if content:
+                break
     if not content:
         return None
 
@@ -416,11 +549,32 @@ def _run_rapidocr(image_bytes: bytes) -> dict:
 
 
 def _extraction_quality(fields: dict) -> int:
-    score = sum(bool(fields.get(field)) for field in fields)
+    score = int(bool(fields.get("brand_name")))
+    score += int(classify_alcohol_type(fields.get("class_type"))[0] is not None)
+    score += int(bool(fields.get("alcohol_content")))
+    score += int(bool(fields.get("net_contents")))
     warning = fields.get("warning_statement") or ""
     if len(warning) >= 180 and "health problems" in warning.lower():
-        score += 2
+        score += 3
     return score
+
+
+def _retry_region(fields: dict) -> str:
+    warning = fields.get("warning_statement") or ""
+    missing_upper = (
+        classify_alcohol_type(fields.get("class_type"))[0] is None
+        or not fields.get("alcohol_content")
+    )
+    missing_lower = (
+        not fields.get("net_contents")
+        or len(warning) < 180
+        or "health problems" not in warning.lower()
+    )
+    if missing_upper and not missing_lower:
+        return "upper"
+    if missing_lower and not missing_upper:
+        return "lower"
+    return "full"
 
 
 def _merge_extractions(primary: dict, secondary: dict) -> dict:
@@ -432,60 +586,109 @@ def _merge_extractions(primary: dict, secondary: dict) -> dict:
         merged.get("warning_statement") or ""
     ):
         merged["warning_statement"] = secondary["warning_statement"]
+    primary_type, _ = classify_alcohol_type(merged.get("class_type"))
+    secondary_type, _ = classify_alcohol_type(secondary.get("class_type"))
+    if secondary_type is not None and (
+        primary_type is None
+        or (
+            primary_type == secondary_type
+            and len(secondary.get("class_type") or "")
+            > len(merged.get("class_type") or "")
+        )
+    ):
+        merged["class_type"] = secondary["class_type"]
     return merged
 
 
-async def extract_label_fields(image_bytes: bytes) -> ExtractedLabel:
-    """Extract fields locally, with provider and Tesseract fallbacks."""
+async def extract_label_fields(
+    image_bytes: bytes, mode: str | None = None
+) -> ExtractedLabel:
+    """Extract using the requested fast, accurate, or compatibility mode.
+
+    ``local`` is the user-facing Fast mode and performs one bounded OCR pass.
+    ``vision`` is the user-facing Accurate mode and never adds local OCR latency.
+    ``auto`` remains available for API compatibility and may combine both.
+    """
+    mode = (mode or os.getenv("EXTRACTION_MODE", "local")).strip().lower()
+    if mode not in {"vision", "auto", "local"}:
+        mode = "local"
+
+    if mode == "vision" and not vision_provider_configured():
+        raise ExtractionUnavailableError(
+            "Accurate AI vision is not configured. Choose Fast read or configure "
+            "OPENAI_API_KEY on the server."
+        )
+
+    use_vision = mode in {"vision", "auto"} and vision_provider_configured()
+    provider_fields = None
+
+    if use_vision:
+        vision_image = _normalize_image(
+            image_bytes,
+            max_side=VISION_IMAGE_MAX_SIDE,
+            output_format="JPEG",
+        )
+        provider_timeout = (
+            ACCURATE_TIMEOUT_SECONDS
+            if mode == "vision"
+            else AUTO_PROVIDER_TIMEOUT_SECONDS
+        )
+        provider_label = await _call_provider(vision_image, provider_timeout)
+        if provider_label is not None:
+            provider_fields = provider_label.model_dump()
+            if mode == "vision" or _extraction_quality(provider_fields) >= 7:
+                return provider_label
+        elif mode == "vision":
+            raise ExtractionUnavailableError(
+                f"Accurate AI vision did not respond within "
+                f"{ACCURATE_TIMEOUT_SECONDS:g} seconds. Try again or choose Fast read."
+            )
+
     normalized_image = _normalize_image(image_bytes)
-
-    # Supplying a provider key is an explicit opt-in to the higher-accuracy
-    # vision path, which is particularly helpful for curved bottles,
-    # perspective distortion, and decorative typography. Local OCR remains the
-    # self-contained default and the provider's automatic fallback.
-    if os.getenv("LLM_API_KEY"):
-        label = await _call_provider(normalized_image)
-        if label is not None:
-            return label
-
     local_fields = None
     if rapidocr_available():
         try:
             local_fields = await asyncio.to_thread(_run_rapidocr, normalized_image)
-            # A second high-contrast pass is only charged when the first pass
-            # misses a field or truncates the long government warning.
-            if _extraction_quality(local_fields) < 7:
+            if provider_fields is not None:
+                merged_fields = _merge_extractions(provider_fields, local_fields)
+                if any(merged_fields.values()):
+                    return ExtractedLabel(**merged_fields)
+            if _extraction_quality(local_fields) >= 7:
+                return ExtractedLabel(**local_fields)
+
+            if mode == "auto":
+                # Compatibility mode can trade additional latency for a
+                # contrast-enhanced local retry after an incomplete result.
+                # difficult lighting. Crop toward the missing fields so small
+                # text gains resolution without increasing peak tensor size.
                 enhanced_image = await asyncio.to_thread(
-                    _enhance_image, normalized_image
+                    _enhance_image, normalized_image, _retry_region(local_fields)
                 )
                 enhanced_fields = await asyncio.to_thread(
                     _run_rapidocr, enhanced_image
                 )
                 local_fields = _merge_extractions(local_fields, enhanced_fields)
-            if any(local_fields.values()):
+            if local_fields and any(local_fields.values()):
                 return ExtractedLabel(**local_fields)
         except Exception as exc:  # Keep the optional fallbacks available.
             logger.warning("RapidOCR extraction failed: %s", type(exc).__name__)
 
-    # This also covers unusual configurations where a provider key was added
-    # after the initial check above.
-    label = await _call_provider(normalized_image)
-    if label is not None:
-        return label
+    if provider_fields is not None and any(provider_fields.values()):
+        return ExtractedLabel(**provider_fields)
 
     # Retain Tesseract for development environments where it is installed.
     try:
         import pytesseract
     except ImportError as exc:
         raise ExtractionUnavailableError(
-            "Image extraction is unavailable. Install RapidOCR, configure LLM_API_KEY, "
-            "or install Tesseract OCR."
+            "Image extraction is unavailable. Configure OPENAI_API_KEY, install "
+            "RapidOCR, or install Tesseract OCR."
         ) from exc
 
     if shutil.which("tesseract") is None:
         raise ExtractionUnavailableError(
-            "Image extraction is unavailable. Install RapidOCR, configure a working "
-            "LLM_API_KEY, or install the Tesseract system binary."
+            "Image extraction is unavailable. Configure a working OPENAI_API_KEY, "
+            "install RapidOCR, or install the Tesseract system binary."
         )
 
     img = Image.open(BytesIO(normalized_image))

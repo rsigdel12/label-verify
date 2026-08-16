@@ -7,6 +7,19 @@ from app.models import ApplicationSubmission
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+ALLOWED_EXTRACTION_MODES = {"local", "vision"}
+
+
+def validate_extraction_mode(extraction_mode: str | None) -> str | None:
+    if extraction_mode is None:
+        return None
+    mode = extraction_mode.strip().lower()
+    if mode not in ALLOWED_EXTRACTION_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail="extraction_mode must be local (Fast) or vision (Accurate).",
+        )
+    return mode
 
 
 def parse_application_data(application_data: str) -> dict:

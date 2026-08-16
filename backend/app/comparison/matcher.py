@@ -4,6 +4,11 @@ from decimal import Decimal, InvalidOperation
 from rapidfuzz import fuzz
 
 from app.comparison.rules import FUZZY_MATCH_THRESHOLD
+from app.extraction.class_types import (
+    classify_alcohol_type,
+    expected_type_accepts,
+    same_type_family,
+)
 from app.extraction.schema import ExtractedLabel
 
 
@@ -40,15 +45,42 @@ def _compare_class_type(expected: str | None, actual: str | None) -> dict:
     normalized_expected = _normalize_text(expected)
     normalized_actual = _normalize_text(actual)
     score = fuzz.ratio(normalized_expected, normalized_actual)
+    expected_type, _ = classify_alcohol_type(expected)
+    actual_type, _ = classify_alcohol_type(actual)
     if normalized_expected == normalized_actual:
         status = "pass"
     elif score >= FUZZY_MATCH_THRESHOLD:
         # A close regulated designation may be an OCR error or a real label
         # typo. Do not silently approve it without a person checking the image.
         status = "needs_review"
+    elif expected_type is not None and expected_type == actual_type:
+        # A reviewer may deliberately choose a common enum value such as
+        # "Whiskey" while the label carries a more specific compliant
+        # designation. That category match can pass. Two different detailed
+        # strings in the same category still require a person to verify them.
+        expected_is_enum_value = normalized_expected == _normalize_text(
+            expected_type.value
+        )
+        status = "pass" if expected_is_enum_value else "needs_review"
+    elif same_type_family(expected_type, actual_type):
+        expected_is_enum_value = normalized_expected == _normalize_text(
+            expected_type.value
+        )
+        if expected_is_enum_value and expected_type_accepts(expected_type, actual_type):
+            status = "pass"
+        elif expected_type_accepts(actual_type, expected_type):
+            status = "needs_review"
+        else:
+            status = "fail"
     else:
         status = "fail"
-    return _comparison(status, expected, actual, similarity=round(score, 1))
+    return _comparison(
+        status,
+        expected,
+        actual,
+        similarity=round(score, 1),
+        matched_type=actual_type.value if actual_type else None,
+    )
 
 
 def _compare_exact(expected: str | None, actual: str | None) -> dict:
@@ -66,17 +98,29 @@ def _decimal_match(pattern: str, value: str | None) -> Decimal | None:
     if not match:
         return None
     try:
-        return Decimal(match.group(1))
+        return Decimal(match.group(1).replace(",", "."))
     except InvalidOperation:
         return None
+
+
+def _alcohol_percent(value: str | None) -> Decimal | None:
+    if value is None:
+        return None
+    percent = _decimal_match(
+        r"(\d+(?:[.,]\d+)?)\s*(?:%|percent\b|per\s*cent\b)", value
+    )
+    if percent is not None:
+        return percent
+    proof = _decimal_match(r"(\d+(?:[.,]\d+)?)\s*proof\b", value)
+    return proof / 2 if proof is not None else None
 
 
 def _compare_alcohol_content(expected: str | None, actual: str | None) -> dict:
     if expected is None or actual is None:
         return _comparison("needs_review", expected, actual)
 
-    expected_percent = _decimal_match(r"(\d+(?:\.\d+)?)\s*%", expected)
-    actual_percent = _decimal_match(r"(\d+(?:\.\d+)?)\s*%", actual)
+    expected_percent = _alcohol_percent(expected)
+    actual_percent = _alcohol_percent(actual)
     if expected_percent is None or actual_percent is None:
         return _compare_exact(expected, actual)
 
@@ -89,7 +133,8 @@ def _net_contents_ml(value: str | None) -> Decimal | None:
     if value is None:
         return None
     match = re.search(
-        r"(\d+(?:\.\d+)?)\s*(ml|millilit(?:er|re)s?|l|lit(?:er|re)s?)\b",
+        r"(\d+(?:[.,]\d+)?)\s*(m(?:l|1)|rn(?:l|1)|millilit(?:er|re)s?|cl|centilit(?:er|re)s?|"
+        r"l|lit(?:er|re)s?|fl\.?\s*oz\.?|fluid\s+ounces?|oz\.?)\b",
         str(value),
         flags=re.IGNORECASE,
     )
@@ -99,8 +144,16 @@ def _net_contents_ml(value: str | None) -> Decimal | None:
         amount = Decimal(match.group(1))
     except InvalidOperation:
         return None
-    unit = match.group(2).lower()
-    return amount * 1000 if unit in {"l", "liter", "litre", "liters", "litres"} else amount
+    unit = re.sub(r"[.\s]", "", match.group(2).lower())
+    if unit in {"l", "liter", "litre", "liters", "litres"}:
+        return amount * 1000
+    if unit in {"m1", "rnl", "rn1"}:
+        return amount
+    if unit in {"cl", "centiliter", "centilitre", "centiliters", "centilitres"}:
+        return amount * 10
+    if unit in {"floz", "fluidounce", "fluidounces", "oz"}:
+        return amount * Decimal("29.5735295625")
+    return amount
 
 
 def _compare_net_contents(expected: str | None, actual: str | None) -> dict:
@@ -123,8 +176,22 @@ def _compare_warning_statement(expected: str | None, actual: str | None) -> dict
     # spelling, numbering, and word order must still be exact.
     normalized_expected = re.sub(r"\s+", "", str(expected).strip())
     normalized_actual = re.sub(r"\s+", "", str(actual).strip())
-    status = "pass" if normalized_expected == normalized_actual else "fail"
-    return _comparison(status, expected, actual)
+    if normalized_expected == normalized_actual:
+        return _comparison("pass", expected, actual, similarity=100.0)
+
+    similarity = fuzz.ratio(str(expected).strip(), str(actual).strip())
+    heading_verified = bool(re.match(r"^GOVERNMENT\s+WARNING\s*:", str(actual).strip()))
+    # A near-complete OCR transcription is evidence that the warning is
+    # present, but it is not safe to approve exact regulated wording when OCR
+    # dropped punctuation or confused a character.
+    status = "needs_review" if similarity >= 90 and heading_verified else "fail"
+    return _comparison(
+        status,
+        expected,
+        actual,
+        similarity=round(similarity, 1),
+        heading_verified=heading_verified,
+    )
 
 
 def compare_fields(extracted: ExtractedLabel, submitted: dict) -> dict:

@@ -66,6 +66,56 @@ def test_application_startup_preloads_local_ocr(monkeypatch):
     assert calls == ["loaded"]
 
 
+def test_application_startup_preloads_fast_mode_even_with_vision_configured(monkeypatch):
+    calls = []
+
+    monkeypatch.setenv("OPENAI_API_KEY", "configured")
+    monkeypatch.setenv("EXTRACTION_MODE", "vision")
+    monkeypatch.setattr("app.main.initialize_local_ocr", lambda: calls.append("loaded"))
+    monkeypatch.setattr("app.main.vision_provider_configured", lambda: True)
+    with TestClient(app) as lifespan_client:
+        assert lifespan_client.get("/health").status_code == 200
+
+    assert calls == ["loaded"]
+
+
+def test_verify_forwards_selected_extraction_mode(monkeypatch):
+    calls = []
+
+    async def fake_extract(_image, mode):
+        calls.append(mode)
+        return ExtractedLabel(**submission())
+
+    monkeypatch.setattr("app.routes.verify.extract_label_fields", fake_extract)
+    response = client.post(
+        "/verify",
+        files={"file": ("label.png", image_bytes(), "image/png")},
+        data={
+            "application_data": json.dumps(submission()),
+            "extraction_mode": "vision",
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == ["vision"]
+
+
+def test_verify_rejects_unknown_extraction_mode():
+    response = client.post(
+        "/verify",
+        files={"file": ("label.png", image_bytes(), "image/png")},
+        data={
+            "application_data": json.dumps(submission()),
+            "extraction_mode": "turbo",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "extraction_mode must be local (Fast) or vision (Accurate)."
+    )
+
+
 def test_verify_clean_fixture_end_to_end():
     metadata = json.loads(
         (FIXTURES / "fixture_01_clean_match.json").read_text(encoding="utf-8")
