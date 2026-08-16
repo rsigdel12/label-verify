@@ -21,8 +21,8 @@ from app.extraction.schema import ExtractedLabel
 
 logger = logging.getLogger(__name__)
 MAX_IMAGE_PIXELS = 20_000_000
-OCR_IMAGE_MAX_SIDE = 1100
-OCR_DETECTION_MAX_SIDE = 1024
+OCR_IMAGE_MAX_SIDE = 800
+OCR_DETECTION_MAX_SIDE = 768
 OCR_PREPROCESS_MAX_SIDE = 1600
 OCR_RETRY_MAX_SIDE = 960
 LOCAL_OCR_RETRY_CUTOFF_SECONDS = 2.25
@@ -58,9 +58,7 @@ VISION_PROMPT = (
 LOCAL_MODEL_DIR = Path(__file__).resolve().parent / "models"
 LOCAL_DETECTION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_det_tiny.onnx"
 LOCAL_RECOGNITION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_rec_tiny.onnx"
-LOCAL_DETAIL_RECOGNITION_MODEL = LOCAL_MODEL_DIR / "PP-OCRv6_rec_small.onnx"
 _rapidocr_engine = None
-_rapidocr_detail_engine = None
 _rapidocr_init_lock = threading.Lock()
 _rapidocr_inference_lock = threading.Lock()
 
@@ -980,27 +978,10 @@ def _get_rapidocr_engine():
     return _rapidocr_engine
 
 
-def _get_rapidocr_detail_engine():
-    """Return the stronger PaddleOCR recognizer used only for tiny legal text."""
-    global _rapidocr_detail_engine
-    if _rapidocr_detail_engine is None:
-        with _rapidocr_init_lock:
-            if _rapidocr_detail_engine is None:
-                recognition_model = (
-                    LOCAL_DETAIL_RECOGNITION_MODEL
-                    if LOCAL_DETAIL_RECOGNITION_MODEL.is_file()
-                    else LOCAL_RECOGNITION_MODEL
-                )
-                _rapidocr_detail_engine = _create_rapidocr_engine(recognition_model)
-    return _rapidocr_detail_engine
-
-
 def initialize_local_ocr() -> None:
     """Load local model sessions during application startup."""
     if rapidocr_available():
         _get_rapidocr_engine()
-        if LOCAL_DETAIL_RECOGNITION_MODEL.is_file():
-            _get_rapidocr_detail_engine()
 
 
 def _run_rapidocr(image_bytes: bytes) -> dict:
@@ -1031,13 +1012,9 @@ def _run_small_label_details(image_bytes: bytes) -> dict:
     image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     height, width = image.shape[:2]
     left, right = round(width * 0.16), round(width * 0.84)
-    measurement_engine = _get_rapidocr_engine()
-    # PP-OCRv6-small is substantially better on five-pixel warning text, but
-    # using it on the full label costs too much latency. Reserve it for the
-    # handful of lower-label strips and keep the tiny model for measurements.
-    warning_engine = _get_rapidocr_detail_engine()
+    engine = _get_rapidocr_engine()
 
-    def recognize(engine, y: int, strip_height: int) -> tuple[str, float]:
+    def recognize(y: int, strip_height: int) -> tuple[str, float]:
         crop = image[max(0, y) : min(height, y + strip_height), left:right]
         if crop.size == 0:
             return "", 0.0
@@ -1045,6 +1022,25 @@ def _run_small_label_details(image_bytes: bytes) -> dict:
         text = (result.txts or ("",))[0]
         score = float((result.scores or (0.0,))[0])
         return text.strip(), score
+
+    # Horizontal edge energy finds printed rows without another neural-model
+    # detector pass. This makes the number of recognition calls depend on the
+    # visible lines, not on dozens of sliding-window guesses.
+    gray = cv2.cvtColor(image[:, left:right], cv2.COLOR_BGR2GRAY)
+    row_energy = np.mean(
+        np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)), axis=1
+    )
+
+    def row_peaks(start_ratio: float, end_ratio: float) -> list[tuple[float, int]]:
+        start = max(0, round(height * start_ratio))
+        end = min(height - 1, round(height * end_ratio))
+        radius = max(2, round(height * 0.004))
+        return [
+            (float(row_energy[y]), y)
+            for y in range(start, end + 1)
+            if row_energy[y]
+            >= max(row_energy[max(0, y - radius) : min(height, y + radius + 1)])
+        ]
 
     fields = {
         "brand_name": None,
@@ -1054,48 +1050,43 @@ def _run_small_label_details(image_bytes: bytes) -> dict:
         "warning_statement": None,
     }
     with _rapidocr_inference_lock:
-        # ABV and net contents usually share one comparatively large line just
-        # below the warning. Recognition-only strips avoid a costly detector
-        # pass and preserve the leading digit that the full view often loses.
+        # ABV and net contents usually share one comparatively large row below
+        # the warning. Nearby edge peaks belong to the same printed row; group
+        # them and recognize only the strongest group.
         measurement_height = max(12, round(height * 0.025))
-        measurement_step = max(3, round(height * 0.006))
-        measurements = []
-        for y in range(
-            round(height * 0.70),
-            round(height * 0.80) + 1,
-            measurement_step,
-        ):
-            text, confidence = recognize(measurement_engine, y, measurement_height)
-            parsed = _extract_from_text(text)
-            if parsed.get("alcohol_content") or parsed.get("net_contents"):
-                measurements.append(
-                    (
-                        int(
-                            bool(parsed.get("alcohol_content"))
-                            and bool(parsed.get("net_contents"))
-                        ),
-                        int(_alcohol_is_plausible(parsed.get("alcohol_content"))),
-                        confidence,
-                        parsed,
-                    )
-                )
-        if measurements:
-            best_measurement = max(measurements, key=lambda item: item[:3])[3]
-            fields["alcohol_content"] = best_measurement.get("alcohol_content")
-            fields["net_contents"] = best_measurement.get("net_contents")
+        # Stop before the URL/barcode footer, whose larger lettering can have
+        # more edge energy than the declaration itself.
+        measurement_peaks = sorted(row_peaks(0.72, 0.77), key=lambda item: item[1])
+        peak_groups: list[list[tuple[float, int]]] = []
+        group_gap = max(6, round(height * 0.016))
+        for peak in measurement_peaks:
+            if not peak_groups or peak[1] - peak_groups[-1][-1][1] > group_gap:
+                peak_groups.append([peak])
+            else:
+                peak_groups[-1].append(peak)
+        if peak_groups:
+            measurement_group = max(
+                peak_groups, key=lambda group: sum(energy for energy, _ in group)
+            )
+            measurement_y = min(y for _, y in measurement_group) - max(
+                2, round(height * 0.005)
+            )
+        else:
+            measurement_y = round(height * 0.738)
+        measurement_text, _ = recognize(measurement_y, measurement_height)
+        measurement_fields = _extract_from_text(measurement_text)
+        fields["alcohol_content"] = measurement_fields.get("alcohol_content")
+        fields["net_contents"] = measurement_fields.get("net_contents")
 
         # Locate the statutory heading, then read each successive printed line.
         # Expected anchors validate the segmentation; they never replace the
         # body text actually recognized from the image.
         warning_height = max(10, round(height * 0.019))
-        warning_step = max(6, round(height * 0.015))
         heading_candidates = []
-        for y in range(
-            round(height * 0.60),
-            round(height * 0.69) + 1,
-            warning_step,
-        ):
-            text, confidence = recognize(warning_engine, y, warning_height)
+        likely_heading_rows = sorted(row_peaks(0.60, 0.69), reverse=True)[:4]
+        for _, peak_y in likely_heading_rows:
+            y = peak_y - round(warning_height * 0.67)
+            text, confidence = recognize(y, warning_height)
             if len(text) < 12:
                 continue
             heading_score = sum(
@@ -1103,6 +1094,8 @@ def _run_small_label_details(image_bytes: bytes) -> dict:
                 for anchor in ("government", "warning", "surgeon general")
             ) / 3
             heading_candidates.append((heading_score, confidence, y, text))
+            if heading_score >= 78:
+                break
 
         if heading_candidates:
             heading_score, _, heading_y, heading_text = max(heading_candidates)
@@ -1133,7 +1126,7 @@ def _run_small_label_details(image_bytes: bytes) -> dict:
                 line_pitch = max(7, round(height * 0.014))
                 for index, anchor in enumerate(clause_anchors):
                     y = heading_y + first_clause_offset + index * line_pitch
-                    text, _ = recognize(warning_engine, y, warning_height)
+                    text, _ = recognize(y, warning_height)
                     similarity = fuzz.partial_ratio(anchor, text.casefold())
                     if similarity >= 40 and text:
                         warning_lines.append(text)
