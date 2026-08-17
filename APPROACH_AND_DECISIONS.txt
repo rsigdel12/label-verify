@@ -1,0 +1,356 @@
+LABEL VERIFY - APPROACH, DECISIONS, AND ASSUMPTIONS
+==================================================
+
+PURPOSE
+-------
+
+Label Verify is a proof of concept that helps a reviewer read alcohol label
+artwork and compare it with approved application values. It checks five fields:
+brand name, class/type, alcohol content, net contents, and government warning.
+
+The application is a review aid, not an approval system. A compliance specialist
+remains responsible for the final decision.
+
+
+APPROACH
+--------
+
+The application follows this pipeline:
+
+  Upload image -> Validate -> Extract text -> Normalize and compare
+               -> Show pass, fail, or needs_review -> Human review
+
+Application values are treated as expected values. Text extracted from the label
+is treated as actual values. Results are shown field by field so a reviewer can
+see why attention is needed.
+
+The interface separates the reviewer's task from the technology used to read the
+image. This keeps the workflow understandable while still making the speed and
+accuracy tradeoff explicit.
+
+The expected user base is intentionally broad. It includes long-tenured agents
+who may be uncomfortable with new systems, newer staff who expect efficient
+digital tools, people processing one difficult case, and people working through
+large seasonal queues. We therefore optimized for a usable default path first:
+one page, familiar language, a working example, minimal required choices, and no
+technical setup for Fast mode. More advanced options such as Accurate reading and
+batch upload are available without making the basic single-label task harder.
+
+
+OPERATING MODES
+---------------
+
+The application has two workflow modes:
+
+Compare with application
+  This is the main compliance-assistance workflow. The reviewer enters the
+  approved application values and uploads label artwork. The application treats
+  the entered values as expected and the extracted label text as actual, then
+  reports pass, fail, or needs_review for every field. The result always shows
+  both values so the reviewer can inspect the reason for the status. A suggested
+  class/type list and an editable prefilled government warning reduce repetitive
+  entry while preserving the ability to enter the exact approved wording.
+
+Scan label only
+  This mode reads and displays the five visible fields without requiring an
+  application record or making comparisons. It is useful for transcription,
+  initial intake, or checking what the OCR can read. The form fields are hidden
+  and disabled, the action changes to "Scan label," and the result includes a
+  clear advisory that transcription is not a compliance decision. Scan-only is
+  limited to one image at a time to keep its purpose simple. This gives users who
+  only need transcription a shorter path and avoids presenting an unnecessary
+  application form.
+
+The reviewer can choose either reading mode within those workflows:
+
+Fast - local OCR
+  Fast uses the bundled RapidOCR models on the application server. It requires no
+  API key, avoids provider cost, works when outbound network access is blocked,
+  and targets the stakeholder's approximately five-second response requirement.
+  The interface displays both server processing time and total request time so
+  performance is visible rather than assumed.
+
+Accurate - AI vision
+  Accurate sends a resized image to a configured Gemini or OpenAI vision model.
+  It is intended for difficult photographs where contextual vision may perform
+  better. The interface clearly warns that it may take longer and that the image
+  is sent to the selected provider. If no provider is configured, the option is
+  disabled instead of allowing a request that cannot work.
+
+The user-facing names are deliberately outcome-oriented. A reviewer only needs
+to understand that Fast is local and quicker while Accurate may handle difficult
+images better and take longer. Provider names, retry rules, preprocessing, and
+other implementation details stay out of the main workflow unless they affect
+privacy, availability, or expected wait time.
+
+Compare mode also supports batch review. Selecting multiple images sends them to
+the batch endpoint, applies the entered application values to each image, and
+returns a separate result or error for every file. The API additionally supports
+one application object per image for future integrations. This directly addresses
+the peak-season need to process groups of labels instead of submitting them one
+at a time.
+
+Separating workflow mode from reading mode was deliberate: "what the reviewer
+wants to do" and "how the image is read" are different decisions. A reviewer can
+therefore scan or compare without needing to understand OCR implementation
+details.
+
+
+WHY THESE TOOLS
+---------------
+
+FastAPI and Pydantic
+  FastAPI provides a compact Python API, async request handling, file upload
+  support, health endpoints, and generated API documentation. Pydantic validates
+  the five-field application schema and rejects unexpected fields. Separate
+  /scan, /verify, and /verify/batch routes keep each contract small, while /ready
+  lets the browser determine which reading modes are actually available.
+
+Plain HTML, CSS, and JavaScript
+  The interface is small, so a frontend framework would add a build step and
+  dependencies without a clear prototype benefit. FastAPI serves the frontend
+  and API as one deployable service. Native form controls provide familiar
+  browser behavior and keyboard support. JavaScript adds only the state needed
+  for mode selection, validation, previews, requests, focus movement, and result
+  rendering.
+
+RapidOCR, PaddleOCR PP-OCRv6, and ONNX Runtime
+  These provide a self-contained local OCR path. Small ONNX models are stored in
+  the repository for repeatable setup and are loaded during application startup
+  to avoid adding initialization time to the first request. The detector and
+  recognizer run through a shared RapidOCR engine with thread-bounded ONNX Runtime
+  sessions so a constrained deployment does not create excessive CPU threads or
+  duplicate model memory.
+
+OpenCV and Pillow
+  Label photos may be rotated, skewed, small in the frame, or unevenly lit.
+  These tools support image validation, EXIF rotation, perspective correction,
+  contrast adjustment, sharpening, cropping, and resizing before OCR. Validation
+  occurs on decoded dimensions as well as uploaded bytes so a small compressed
+  file cannot expand into an unexpectedly large in-memory image.
+
+Gemini and OpenAI vision
+  Optional provider support gives reviewers an Accurate mode for harder images.
+  Requests use a strict five-field JSON schema and instruct the model to
+  transcribe only visible text rather than recreate expected warning wording.
+  The image is resized before upload, transient failures receive one bounded
+  retry, and unsuccessful Accurate requests return a clear service error.
+
+RapidFuzz
+  OCR often introduces small spacing, casing, or character differences. Fuzzy
+  similarity scores allow controlled tolerance without a heavier matching model.
+
+Pytest and generated fixtures
+  Automated tests make the API and matching rules repeatable. Generated labels
+  cover known matches, mismatches, skew, glare, and OCR variations. They are
+  regression inputs, not a replacement for real-world evaluation data.
+
+Render
+  Render can deploy this Python service directly from the repository. The
+  included Blueprint records the build, start, health-check, Python-version, and
+  secret configuration in source control.
+
+
+KEY DESIGN DECISIONS
+--------------------
+
+Local OCR is the default.
+  The prototype works without an external account or outbound API access. One
+  full-label pass is used first. A limited number of focused passes run only when
+  fields are incomplete, with a 2.25-second retry cutoff to keep Fast mode
+  predictable. The OCR engine is preloaded during FastAPI startup, and inference
+  runs outside the async event loop so image processing does not block unrelated
+  request handling.
+
+Image preprocessing is conservative.
+  A confident label region can be straightened and enhanced. If the crop is
+  ambiguous, the complete image is retained so required text is not discarded.
+  Pillow corrects phone-camera EXIF orientation and enforces a 20-megapixel
+  decoded-image limit. OpenCV can locate a small label, correct perspective from
+  the original pixels, apply local contrast enhancement and mild sharpening, and
+  resize to an OCR-friendly bound. Very small exports use focused horizontal-line
+  recognition for measurements and warning text rather than many overlapping
+  full detection passes. Fast-mode PNG and WEBP files over 300 KB may also be
+  compressed in the browser before transfer; Accurate mode preserves the
+  original upload until server-side provider normalization.
+
+Provider failure is explicit.
+  Accurate mode retries transient provider problems once. If it still fails, the
+  user sees an error. It does not silently substitute local OCR and claim that
+  Accurate mode succeeded. Provider images are normalized to a maximum
+  1600-pixel JPEG. Each attempt has a 20-second timeout, and retryable timeouts,
+  throttling responses, and server errors use a short backoff. This bounds the
+  worst-case wait while allowing recovery from brief free-tier failures.
+
+Comparison rules reflect field meaning.
+  Brand names use a 90 percent fuzzy threshold. Class/type uses controlled
+  beverage categories and sends close regulated wording to manual review.
+  Alcohol values are normalized so 40% ABV equals 80 proof. Net contents are
+  converted across mL, cL, liters, and fluid ounces. This field-specific approach
+  avoids both extremes of literal string equality and one generic AI decision.
+  The deterministic rules are inspectable, testable, and can later be versioned
+  for an audit trail.
+
+Warning matching is conservative.
+  Capitalization and OCR-created whitespace are ignored, but spelling,
+  punctuation, numbering, and word order still matter. A recognizable near
+  match becomes needs_review instead of pass. OCR text cannot prove required
+  visual styling such as uppercase, bold type, size, contrast, or placement.
+  Accurate-mode prompting explicitly prohibits filling in standard wording from
+  memory. Local warning candidates may be ranked against the required wording to
+  find the best visible region, but the returned value remains OCR transcription
+  rather than substituted boilerplate.
+
+Missing evidence requires review.
+  If an expected or extracted field is missing, it is marked needs_review rather
+  than automatically passing or failing.
+
+Batch errors are isolated.
+  Files are processed independently, so one invalid or unreadable image does not
+  remove successful results for the rest of the batch. Provider concurrency is
+  lower than local concurrency to reduce rate-limit failures. The endpoint uses
+  asynchronous gathering with a semaphore: up to five local files or two vision
+  requests can be active. Results remain in upload order and include a batch
+  summary with completed, failed, and total counts.
+
+The interface emphasizes human review.
+  Results retain the expected and detected text and use the explicit words Pass,
+  Fail, and Needs review. The system never presents OCR confidence as a final
+  legal decision, and scan-only results are clearly identified as transcription.
+
+
+ACCESSIBILITY AND USER EXPERIENCE
+---------------------------------
+
+The discovery notes describe reviewers with widely different ages, experience,
+and levels of technical comfort. Some agents have worked in the same review
+process for decades and may be skeptical of another modernization tool; others
+expect faster digital workflows and batch operations. The interface was therefore
+designed so a first-time or low-confidence user can complete the basic task
+without training, while an experienced user can still move quickly. One guided
+page, familiar language, predictable controls, and progressive disclosure were
+chosen instead of a dense dashboard or technical configuration screen.
+
+Clear task structure
+  The first question is "What would you like to do?" with two descriptive task
+  buttons. The remaining work is organized into numbered steps: choose the label
+  image, then enter approved values when comparison is selected. The primary
+  button changes between Scan label, Verify label, and Verify labels so the
+  action always matches the current task.
+
+Progressive disclosure through modes
+  Compare mode shows the approved-value form because those fields are necessary
+  for that task. Scan-only hides and disables them because they are irrelevant.
+  Fast is selected by default and works without credentials; Accurate appears in
+  the same reading-mode control but is disabled when unavailable. Batch behavior
+  activates naturally when several files are selected instead of requiring a
+  separate advanced screen. This gives different users the amount of interface
+  they need without forcing every user through every option.
+
+Low-effort data entry
+  A working sample fills the form and loads a known image in one action. The
+  standard government warning is prefilled but editable, and class/type offers
+  common suggestions while still accepting a specific designation. File upload
+  supports both browsing and drag-and-drop. "Check new label" clears old results
+  and returns focus to the upload control for repeat reviews.
+
+Confidence and transparency
+  Before submission, the page shows a preview, filename, file size, selected task,
+  reading-mode explanation, provider privacy notice, and current service status.
+  During processing it shows the active task, expected wait, and elapsed time.
+  After processing it shows a plain-language summary, expected and detected values
+  side by side, per-field statuses, and both backend and total request timing.
+  These details help experienced reviewers verify the tool and help less technical
+  users understand what is happening without exposing internal implementation
+  terminology.
+
+Safe, predictable state changes
+  Changing workflow updates the visible fields, allowed file count, button label,
+  help text, and result presentation together. If several images are selected and
+  the user switches to scan-only, the first image is kept and a notice explains
+  what happened. Reset removes the old preview and results, clears application
+  values, restores the editable standard warning, and places focus at the next
+  action. These behaviors reduce stale-data errors during repetitive work.
+
+Semantic controls and keyboard use
+  The page uses native buttons, inputs, a select, textarea, headings, form labels,
+  and description lists. Every application field has an explicit label. Workflow
+  buttons expose their selected state with aria-pressed, decorative icons are
+  hidden from assistive technology, and a skip link lets keyboard users move
+  directly to the main content. Visible focus styling is provided for the form
+  controls.
+
+Screen-reader and focus feedback
+  Service status, notices, loading state, and results use status or aria-live
+  regions. Processing failures use role=alert. When an error or result appears,
+  the application moves focus to that message or result section so it is not
+  silently added elsewhere on the page.
+
+Meaning beyond color
+  Pass, Fail, and Needs review use different colors, but each badge also contains
+  its full text label. Service availability also includes text next to its status
+  indicator. Expected and detected values are explicitly named instead of being
+  distinguished by position or color alone.
+
+Readable guidance and error recovery
+  Labels and instructions use plain language such as "Choose label image" and
+  "The label could not be processed." Unsupported types, files over 25 MB, empty
+  or corrupt images, unavailable providers, timeouts, and per-file batch errors
+  produce specific messages with a next action where possible. Loading feedback
+  includes elapsed time, and the Fast/Accurate descriptions set expectations
+  before submission.
+
+Responsive presentation
+  The desktop two-column form becomes a single-column layout on smaller screens.
+  Actions expand to full width, field comparisons stack vertically, and long OCR
+  text can wrap instead of overflowing. Controls use comfortable sizing and the
+  content order remains consistent across layouts.
+
+These choices improve usability and assistive-technology support, but the
+prototype has not received a formal WCAG conformance audit or usability study.
+
+
+ASSUMPTIONS
+-----------
+
+- Approved application values are the source of truth for comparison.
+- English-language labels and the five requested fields define the prototype
+  scope.
+- One application normally corresponds to one label. The batch API can also
+  accept one application object per image.
+- A pass means extracted text matched under the documented rules; it does not
+  mean the complete label is legally compliant.
+- Reviewers will inspect needs_review results and visual requirements that OCR
+  cannot verify.
+- External providers may be slow, unavailable, rate-limited, billable, or
+  governed by data-use terms that must be reviewed before production use.
+
+
+PRIVACY AND LIMITATIONS
+-----------------------
+
+Uploads are processed in memory and are not intentionally retained. Fast mode
+keeps processing on the server. Accurate mode sends a resized copy to the chosen
+provider, so that provider's privacy, retention, and billing terms apply.
+
+The prototype has no authentication, database, audit trail, malware scanning,
+COLA integration, or formal retention policy. It does not evaluate every
+beverage-specific rule or requirements such as producer address, country of
+origin, typography, contrast, and placement.
+
+Before production use, the project would need representative real-label
+evaluation data, accuracy thresholds agreed on with compliance staff, identity
+and access controls, audit logging, approved-record integration, monitoring,
+versioned rules, and formal security and data-retention policies.
+
+
+SOURCE CODE MAP
+---------------
+
+backend/app/main.py          Startup, readiness checks, and frontend hosting
+backend/app/extraction/      Image processing, OCR, and vision providers
+backend/app/comparison/      Field normalization and comparison rules
+backend/app/routes/          Scan, verify, batch, and request validation
+backend/tests/               Unit, integration, contract, and fixture tests
+frontend/                    Browser interface and sample label
+render.yaml                  Render deployment configuration

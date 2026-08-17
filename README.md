@@ -1,124 +1,159 @@
 # Label Verify
 
-A standalone proof of concept for scanning alcohol label fields or comparing label artwork with an approved application. Reviewers can transcribe one label without entering an application, or upload one or more images and receive field-level `pass`, `fail`, or `needs_review` comparisons with measured processing time.
+Label Verify is a proof-of-concept web application that helps a reviewer read and compare alcohol beverage label information. It can:
 
-Deployed application: <https://label-verify-p15v.onrender.com/>
+- scan a label and transcribe five important fields;
+- compare one or more labels with approved application values; and
+- report each field as `pass`, `fail`, or `needs_review`.
 
-## What the prototype covers
+Project documentation: [Approach, decisions, and assumptions](APPROACH_AND_DECISIONS.txt)
 
-| Stakeholder need | Implementation |
-| --- | --- |
-| Obvious workflow for mixed technical comfort levels | One two-step screen, drag-and-drop upload, plain-language statuses, keyboard labels, responsive layout, and a one-click working sample |
-| Explicit speed/accuracy choice | **Fast** runs bounded local OCR and targets under five seconds; **Accurate** uses contextual AI vision and retries one transient Gemini failure, taking up to about 40 seconds in the worst case |
-| Scan without an application | Scan-only mode displays the five detected fields with a clear warning that transcription is not a compliance decision |
-| Easy repeat reviews | **Check new label** clears the previous image, results, and application values while restoring the editable standard warning |
-| Compare label artwork with an application | The application form is the expected record; OCR text from the image is the actual value |
-| Required sample fields | Brand name, class/type, alcohol content, net contents, and complete government warning |
-| Faster application entry | The standard TTB government warning is prefilled and remains editable when an approved record differs |
-| Consistent class/type entry | A common TTB-informed alcohol-type enum supplies form suggestions and backend category matching while still allowing specific designations |
-| Human judgment for near matches | Brand casing/spacing is tolerant; a close but nonidentical regulated class/type is `needs_review` rather than silently approved |
-| Warning text matching | Warning comparison ignores capitalization and visual/OCR whitespace while still checking punctuation, spelling, numbering, and word order |
-| Imperfect photos | Test coverage includes 7-degree skew and simulated glare |
-| Peak-season batch work | Multi-select in the same uploader calls the batch API and shows results per file |
-| Restricted outbound network | Local RapidOCR + ONNX Runtime remains available when a vision API is not configured or cannot be reached |
-| Prototype privacy | Uploads are validated and not retained by the app; Accurate-mode images are sent to the configured provider, and Gemini free-tier content may be used to improve Google's products |
-| Useful error handling | Unsupported, empty, oversized, corrupt, unavailable, timeout, and per-file batch failures return actionable messages |
+Live demo: <https://label-verify-p15v.onrender.com/>
 
-The app intentionally assists rather than replaces the compliance agent. Warning wording is compared without case sensitivity, but OCR text alone cannot prove that the `GOVERNMENT WARNING:` heading is visually uppercase and bold. The reviewer must confirm styling and any requirements outside the five prototype fields.
+> **Demo performance:** The public demo uses Render's free hosting tier, so the
+> service may need extra time to start after it has been inactive. Accurate mode
+> also uses Gemini through its free API tier, which can add provider latency or
+> rate-limit delays. Once the Render service is awake.
 
-### Fixture validity
+> Label Verify is a review aid, not an automated compliance decision. A reviewer must confirm the image, warning styling, and requirements outside the prototype's five fields.
 
-The generated distilled-spirits fixtures follow the current TTB examples for the fields in scope: brand, class/type, and alcohol content appear together; net contents uses the accepted `750 mL` form; and the standard warning heading is uppercase and bold while the warning body is regular weight. The domestic label also includes `DISTILLED AND BOTTLED BY ACME SPIRITS — LOUISVILLE, KENTUCKY`; country of origin is not applicable to this domestic example. See TTB's [mandatory distilled-spirits information](https://www.ttb.gov/regulated-commodities/beverage-alcohol/distilled-spirits/ds-labeling-home/ds-brand-label), [health warning](https://www.ttb.gov/regulated-commodities/beverage-alcohol/distilled-spirits/ds-labeling-home/ds-health-warning), and [net contents](https://www.ttb.gov/regulated-commodities/beverage-alcohol/distilled-spirits/ds-labeling-home/ds-net-contents) guidance.
+## Quick start
 
-## Architecture and decisions
+Requirements:
 
-- `backend/app/` — FastAPI routes, validation, local/provider extraction, and comparison rules.
-- `frontend/` — dependency-free HTML, CSS, and JavaScript served by FastAPI.
-- `backend/tests/fixtures/` — eight generated label images with JSON application data and intended results.
-- `frontend/assets/sample-label.png` — self-contained sample used by the live demonstration.
+- Python 3.11 or newer
+- Git
 
-Each request selects its extractor explicitly. **Fast** is the default and keeps the image on the application server. It runs one full-label OCR pass and adds at most two focused detail passes only when required fields are incomplete. **Accurate** sends a 1600-pixel JPEG to a configured vision provider with a strict five-field JSON schema. The recommended prototype provider is `gemini-3.5-flash`, which accepts image input and is available through Gemini's limited free API tier. Existing OpenAI deployments remain supported with `gpt-5.4-mini` through the Responses API. The prompt requires visible transcription rather than filling likely warning text from memory. Gemini gets two 20-second attempts with a short backoff for transient timeouts, HTTP 429 throttling, and server errors. Accurate batches are capped at two concurrent provider calls to reduce free-tier throttling. Successful requests still return immediately, and provider failure does not silently substitute less-accurate OCR.
-
-Fast mode uses PaddleOCR PP-OCRv6 models locally through RapidOCR and ONNX Runtime. Images are limited to 20 megapixels and corrected using phone-camera EXIF orientation. A confidence-gated OpenCV pass can find labels occupying as little as 5% of a phone photo, corrects perspective from the original-resolution pixels, applies local CLAHE contrast and mild sharpening, and resizes to a 600-pixel bound. Ambiguous multi-panel artwork keeps the complete image so preprocessing cannot discard fields. The PP-OCRv6 tiny detector and recognizer handle the full image with a 576-pixel detection bound and lower confidence thresholds, retaining small measurement text without overloading free-tier CPU. Incomplete results receive only the necessary focused grayscale detail pass, with a time cutoff that protects the five-second target. Very small exports use inexpensive horizontal edge analysis to locate likely ABV, net-contents, and warning rows before recognition. This bounds the focused pass to at most nine line reads instead of scanning dozens of overlapping windows. The warning body remains raw OCR and can only produce `needs_review`, never an automatic pass, when the source pixels are too small for exact transcription. Fast-mode PNG and WEBP uploads over 300 KB are compressed at high quality in the browser before transfer; Accurate mode always keeps the original file. Candidate warnings are ranked against the required federal wording, but returned values always remain OCR transcriptions rather than substituted boilerplate. The single shared ONNX session is preloaded at application startup so model initialization is not charged to the first Fast request. A system Tesseract installation remains a final development fallback.
-
-RapidOCR and the bundled PP-OCRv6 model assets are used under the Apache-2.0 license.
-
-### Comparison rules
-
-- Brand name: case-insensitive fuzzy comparison with a 90% threshold.
-- Class/type: common spirits, wine, malt-beverage, cider, and sake types are enum-classified. A selected broad type can match its detected subtype; conflicting subtypes fail; uncertain close text requires review.
-- Alcohol content: percent, `ABV`, `Alcohol by Volume`, decimal-comma, and proof formats are normalized, so `40%` and `80 Proof` are equivalent.
-- Net contents: mL, cL, liters, and fluid ounces are normalized; common OCR unit confusions such as `m1` are corrected.
-- Government warning: matching is case-insensitive; whitespace caused by OCR segmentation is ignored; a high-similarity transcription with a recognizable heading requires review instead of producing an unreliable approval or false failure.
-- Missing application or extraction values require manual review.
-
-## Run locally
-
-Python 3.11 or newer is required.
+From the repository root, run:
 
 ```powershell
-cd label-verify\backend
+cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e .
-python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/>. FastAPI serves both the API and frontend, so a separate static-file server is neither needed nor recommended.
+Then open <http://127.0.0.1:8000/>.
 
-No environment variable is required for Fast local OCR. To enable Accurate mode through Gemini's free tier, create a Google AI Studio API key and set:
+The frontend and API are served together, so there is no separate frontend installation. Fast mode uses the bundled local OCR models and does not require an API key.
 
-- `GEMINI_API_KEY`
-- `GEMINI_MODEL` (defaults to `gemini-3.5-flash`)
-- `EXTRACTION_MODE` (defaults to `local` for older API clients that omit the per-request mode)
+On macOS or Linux, activate the virtual environment with:
 
-The free tier has lower quotas and Google states that submitted content may be used to improve its products, so it is appropriate for this demonstration but not automatically appropriate for sensitive production records. As an optional paid alternative, set `OPENAI_API_KEY`; `VISION_MODEL` defaults to `gpt-5.4-mini`. The legacy `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL` names remain accepted for compatibility. Set `VISION_PROVIDER=gemini` or `openai` only when both keys are present and an explicit preference is needed.
+```bash
+source .venv/bin/activate
+```
 
-## Test and evaluate
+## Try the application
 
-Run the automated suite:
+1. Open the application and select **Try a working sample**.
+2. Choose **Compare with application** or **Scan only**.
+3. Select a reading mode:
+   - **Fast** runs OCR locally on the application server.
+   - **Accurate** uses a configured AI vision provider.
+4. Select **Verify label** or **Scan label**.
+5. Review the detected values and any fields marked for manual review.
+
+You can also upload your own PNG, JPEG, WEBP, or GIF image up to 25 MB. Selecting multiple images starts a batch comparison.
+
+## Optional: enable Accurate mode
+
+Fast mode works immediately after installation. Accurate mode requires either Gemini or OpenAI credentials.
+
+For Gemini, set:
 
 ```powershell
-cd label-verify\backend
+$env:GEMINI_API_KEY="your_key"
+$env:GEMINI_MODEL="gemini-3.5-flash"  # optional; this is the default
+```
+
+Or use OpenAI:
+
+```powershell
+$env:OPENAI_API_KEY="your_key"
+$env:VISION_MODEL="gpt-5.4-mini"       # optional; this is the default
+```
+
+Restart the server after changing environment variables. See [`backend/.env.example`](backend/.env.example) for all available settings. When both provider keys are present, set `VISION_PROVIDER` to `gemini` or `openai` to choose one explicitly.
+
+The default Gemini configuration was selected because it is available for this
+free-tier demonstration. When running the application locally, you can try a
+different Gemini model available to your API key by changing `GEMINI_MODEL`:
+
+```powershell
+$env:GEMINI_MODEL="another_supported_model"
+python -m uvicorn app.main:app --reload
+```
+
+A faster or higher-capability provider model may improve response time or results
+for difficult images, although availability, speed, quotas, and cost depend on
+the provider. Gemini still runs through its API when the application is hosted
+locally; only Fast mode performs OCR entirely on the application machine.
+
+Accurate mode sends the uploaded image to the selected provider. Provider cost, retention, and data-use terms should be reviewed before using sensitive or production data.
+
+## Run the tests
+
+With the virtual environment active:
+
+```powershell
+cd backend
 python -m pytest -q
 ```
 
-The suite contains 69 tests, including per-request mode selection, transient Gemini retry, Gemini and OpenAI request schemas, scan-only extraction, provider readiness/failure behavior, and real local OCR through single and batch multipart endpoints. It also covers startup loading, regional OCR retry behavior, bounded PaddleOCR detail recognition, a small-label phone-photo stress case, non-Latin logo rejection, detailed Scotch classification, focused measurement replacement, joined measurement parsing, noisy-warning review handling, enum classification, alternate ABV/net-content formats, common numeric OCR mistakes, warning uncertainty and candidate ranking, validation and error responses, fixture integrity, timing fields, reset behavior, and the frontend/API contract.
-
-Run the complete real-OCR fixture evaluation:
+To run the real local-OCR fixture evaluation:
 
 ```powershell
 python tests\run_ocr_extraction.py
 ```
 
-Fast mode completes all eight fixtures in about one second or less each on the reference development machine and matches every intended outcome, including the 7-degree skew and glare cases. A synthetic 2400-by-3200 phone photo with the label occupying roughly 7.5% of the frame also extracts all five fields in about one second. The set additionally includes a clean match, brand-case variation, case-insensitive warning match, ABV mismatch, class/type typo requiring review, and net-contents mismatch.
+The test suite covers the API, comparison rules, provider integrations, local OCR, generated fixtures, error handling, and the frontend/backend contract.
 
-## API
+## Project structure
 
-- `GET /health` — process liveness.
-- `GET /ready` — local OCR, optional provider, and Tesseract readiness.
-- `POST /scan` — one image plus optional `extraction_mode`; returns detected fields and an advisory without requiring application data.
-- `POST /verify` — one image in `file`, JSON string in `application_data`, and optional `extraction_mode` (`local` or `vision`).
-- `POST /verify/batch` — images in `files`, either one shared application object or one object per image, and optional shared `extraction_mode`.
+```text
+label-verify/
+|-- backend/
+|   |-- app/                 FastAPI routes, extraction, and comparison logic
+|   |-- tests/               Automated tests and generated label fixtures
+|   `-- pyproject.toml       Python package and dependencies
+|-- frontend/                HTML, CSS, JavaScript, and sample label
+|-- APPROACH_AND_DECISIONS.txt
+|-- render.yaml              Render deployment configuration
+`-- README.md
+```
 
-Successful single responses include `filename`, `extracted`, `comparison`, and `processing_time_ms`. Batch responses include ordered per-file results and a `progress` summary with total processing time.
+## API summary
 
-## Render deployment
+| Method | Endpoint        | Purpose                                  |
+| ------ | --------------- | ---------------------------------------- |
+| `GET`  | `/health`       | Basic process health check               |
+| `GET`  | `/ready`        | Reports available OCR and vision modes   |
+| `POST` | `/scan`         | Extracts fields from one image           |
+| `POST` | `/verify`       | Compares one image with application data |
+| `POST` | `/verify/batch` | Compares multiple images                 |
 
-The included `render.yaml` installs the package and starts the single FastAPI service. RapidOCR model files ship with the installed package, so the deployed app works without `LLM_API_KEY` or a Tesseract system package.
+Interactive API documentation is available at <http://127.0.0.1:8000/docs> while the server is running.
 
-1. Push the latest commit to the repository connected to Render.
-2. Add a free-tier `GEMINI_API_KEY` as a secret environment variable to enable Accurate mode. `GEMINI_MODEL=gemini-3.5-flash` is optional because it is the default.
-3. Wait for the build to install `rapidocr` and `onnxruntime`.
-4. Confirm `/ready` reports `"status":"ready"`, `"local_ocr_available":true`, and `"vision_provider_configured":true` when the key is present.
-5. Open the home page, choose **Try a working sample**, select a reading mode, then **Verify label**.
-6. Confirm all five sample fields pass and processing time is displayed.
+## Deploy with Render
 
-The first request after a free-tier cold start can include platform startup delay. The UI reports backend processing separately from total browser request time so that distinction is visible.
+The repository includes a Render Blueprint in `render.yaml`.
 
-## Known prototype boundaries
+1. Push the repository to GitHub or another supported Git provider.
+2. In Render, create a new Blueprint and select the repository.
+3. Add `GEMINI_API_KEY` if Accurate mode should be enabled.
+4. Deploy and confirm that `/ready` returns `"status": "ready"`.
 
-- No COLA integration, identity system, persistent storage, or production retention policy.
-- The five sample fields are not a complete beverage-specific legal review. Producer address, country-of-origin rules, font size, contrast, placement, and bold styling remain agent checks.
-- Batch UI applies one application to all selected images; the API additionally supports one application object per file.
-- Generated fixtures are deterministic regression inputs, not a substitute for evaluation on a representative set of real bottle photographs.
+Fast mode is self-contained because the RapidOCR ONNX model files are included in the repository.
+
+The free Render service can have a cold-start delay after inactivity. This hosting
+startup time is separate from the processing time reported by the backend and
+from any additional Gemini free-tier delay in Accurate mode.
+
+## Prototype limits
+
+- The application has no login, database, COLA integration, or long-term file storage.
+- It checks five fields only: brand name, class/type, alcohol content, net contents, and government warning.
+- OCR cannot reliably confirm visual rules such as font size, bold text, contrast, or placement.
+- The included fixtures are repeatable test inputs, not a substitute for testing representative real-world bottle photographs.
+- A human reviewer remains responsible for the final compliance decision.
